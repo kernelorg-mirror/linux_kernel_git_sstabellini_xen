@@ -43,12 +43,9 @@ static const char *virt_dt_match[] = {
 	NULL
 };
 
-extern struct smp_operations virt_smp_ops;
-
 DT_MACHINE_START(VIRT, "Dummy Virtual Machine")
 	.init_irq	= irqchip_init,
 	.init_time	= virt_timer_init,
 	.init_machine	= virt_init,
-	.smp		= smp_ops(virt_smp_ops),
 	.dt_compat	= virt_dt_match,
 MACHINE_END
