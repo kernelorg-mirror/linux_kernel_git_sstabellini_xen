@@ -11,6 +11,8 @@
 #include <xen/xenbus.h>
 #include <xen/page.h>
 #include <xen/xen-ops.h>
+#include <asm/mach/arch.h>
+#include <asm/psci.h>
 #include <asm/xen/hypervisor.h>
 #include <asm/xen/hypercall.h>
 #include <linux/interrupt.h>
@@ -176,11 +178,36 @@ static int __init xen_secondary_init(unsigned int cpu)
 	return 0;
 }
 
+static bool __init xen_smp_init(void)
+{
+#ifdef CONFIG_SMP
+	/* If we are running on Xen, use PSCI if available.
+	 * In any case do not try to use the native smp_ops. */
+	if (psci_smp_available())
+		smp_set_ops(&psci_smp_ops);
+#endif
+	return true;
+}
+
 /*
  * see Documentation/devicetree/bindings/arm/xen.txt for the
  * documentation of the Xen Device Tree format.
  */
 #define GRANT_TABLE_PHYSADDR 0
+void __init xen_early_init(void)
+{
+	struct device_node *node;
+
+	node = of_find_compatible_node(NULL, NULL, "xen,xen");
+	if (!node) {
+		pr_debug("No Xen support\n");
+		return;
+	}
+
+	xen_domain_type = XEN_HVM_DOMAIN;
+	machine_desc->smp_init = xen_smp_init;
+}
+
 static int __init xen_guest_init(void)
 {
 	struct xen_add_to_physmap xatp;
@@ -194,25 +221,21 @@ static int __init xen_guest_init(void)
 	int i;
 
 	node = of_find_compatible_node(NULL, NULL, "xen,xen");
-	if (!node) {
-		pr_debug("No Xen support\n");
-		return 0;
-	}
+
 	s = of_get_property(node, "compatible", &len);
 	if (strlen(xen_prefix) + 3  < len &&
 			!strncmp(xen_prefix, s, strlen(xen_prefix)))
 		version = s + strlen(xen_prefix);
 	if (version == NULL) {
-		pr_debug("Xen version not found\n");
-		return 0;
+		pr_warn("Xen version not found\n");
+		return -EINVAL;
 	}
 	if (of_address_to_resource(node, GRANT_TABLE_PHYSADDR, &res))
-		return 0;
+		return -EINVAL;
 	xen_hvm_resume_frames = res.start >> PAGE_SHIFT;
 	xen_events_irq = irq_of_parse_and_map(node, 0);
 	pr_info("Xen %s support found, events_irq=%d gnttab_frame_pfn=%lx\n",
 			version, xen_events_irq, xen_hvm_resume_frames);
-	xen_domain_type = XEN_HVM_DOMAIN;
 
 	xen_setup_features();
 	if (xen_feature(XENFEAT_dom0))
