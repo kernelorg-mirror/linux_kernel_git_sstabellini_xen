@@ -23,6 +23,26 @@ struct psci_power_state {
 	u8	affinity_level;
 };
 
+/*
+ * cpu_suspend   Suspend the execution on a CPU
+ * @state        we don't currently describe affinity levels, so just pass 0.
+ * @entry_point  the first instruction to be executed on return
+ * returns 0  success, < 0 on failure
+ *
+ * cpu_off       Power down a CPU
+ * @state        we don't currently describe affinity levels, so just pass 0.
+ * no return on successful call
+ *
+ * cpu_on        Power up a CPU
+ * @cpuid        cpuid of target CPU, as from MPIDR
+ * @entry_point  the first instruction to be executed on return
+ * returns 0  success, < 0 on failure
+ *
+ * migrate       Migrate the context to a different CPU
+ * @cpuid        cpuid of target CPU, as from MPIDR
+ * returns 0  success, < 0 on failure
+ *
+ */
 struct psci_operations {
 	int (*cpu_suspend)(struct psci_power_state state,
 			   unsigned long entry_point);
@@ -32,5 +52,14 @@ struct psci_operations {
 };
 
 extern struct psci_operations psci_ops;
+extern struct smp_operations psci_smp_ops;
+
+#ifdef CONFIG_ARM_PSCI
+void psci_init(void);
+bool psci_smp_available(void);
+#else
+static inline void psci_init(void) { }
+static inline bool psci_smp_available(void) { return false; }
+#endif
 
 #endif /* __ASM_ARM_PSCI_H */

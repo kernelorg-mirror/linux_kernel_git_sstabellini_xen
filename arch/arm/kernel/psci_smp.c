@@ -1,0 +1,67 @@
+/*
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * Copyright (C) 2012 ARM Limited
+ *
+ * Author: Will Deacon <will.deacon@arm.com>
+ */
+
+#include <linux/init.h>
+#include <linux/irqchip/arm-gic.h>
+#include <linux/smp.h>
+#include <linux/of.h>
+
+#include <asm/psci.h>
+#include <asm/smp_plat.h>
+
+extern void secondary_startup(void);
+
+static int __cpuinit psci_boot_secondary(unsigned int cpu,
+					 struct task_struct *idle)
+{
+	if (psci_ops.cpu_on)
+		return psci_ops.cpu_on(cpu_logical_map(cpu),
+				       __pa(secondary_startup));
+	return -ENODEV;
+}
+
+static void __cpuinit psci_secondary_init(unsigned int cpu)
+{
+	gic_secondary_init(0);
+}
+
+#ifdef CONFIG_HOTPLUG_CPU
+void __ref psci_cpu_die(unsigned int cpu)
+{
+       const struct psci_power_state ps = {
+               .type = PSCI_POWER_STATE_TYPE_POWER_DOWN,
+       };
+
+       if (psci_ops.cpu_off)
+               psci_ops.cpu_off(ps);
+
+       /* We should never return */
+       panic("psci: cpu %d failed to shutdown\n", cpu);
+}
+#else
+#define psci_cpu_die NULL
+#endif
+
+bool __init psci_smp_available(void)
+{
+	/* is cpu_on available at least? */
+	return (psci_ops.cpu_on != NULL);
+}
+
+struct smp_operations __initdata psci_smp_ops = {
+	.smp_secondary_init	= psci_secondary_init,
+	.smp_boot_secondary	= psci_boot_secondary,
+	.cpu_die		= psci_cpu_die,
+};
