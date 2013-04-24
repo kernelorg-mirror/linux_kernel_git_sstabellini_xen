@@ -23,13 +23,44 @@
 #include <linux/of_platform.h>
 #include <linux/smp.h>
 
+#include <xen/xen.h>
+#include <xen/interface/sched.h>
+
 #include <asm/arch_timer.h>
 #include <asm/mach/arch.h>
 #include <asm/mach/time.h>
+#include <asm/xen/hypercall.h>
+
+static void virt_restart(char str, const char *cmd)
+{
+#ifdef CONFIG_XEN
+	if (xen_domain()) {
+		struct sched_shutdown r = { .reason = SHUTDOWN_reboot };
+		int rc;
+		rc = HYPERVISOR_sched_op(SCHEDOP_shutdown, &r);
+		if (rc)
+			BUG();
+	}
+#endif
+}
+
+static void virt_power_off(void)
+{
+#ifdef CONFIG_XEN
+	if (xen_domain()) {
+		struct sched_shutdown r = { .reason = SHUTDOWN_poweroff };
+		int rc;
+		rc = HYPERVISOR_sched_op(SCHEDOP_shutdown, &r);
+		if (rc)
+			BUG();
+	}
+#endif
+}
 
 static void __init virt_init(void)
 {
 	of_platform_populate(NULL, of_default_bus_match_table, NULL, NULL);
+	pm_power_off = virt_power_off;
 }
 
 static void __init virt_timer_init(void)
@@ -52,4 +83,5 @@ DT_MACHINE_START(VIRT, "Dummy Virtual Machine")
 	.init_machine	= virt_init,
 	.smp		= smp_ops(virt_smp_ops),
 	.dt_compat	= virt_dt_match,
+	.restart	= virt_restart,
 MACHINE_END
