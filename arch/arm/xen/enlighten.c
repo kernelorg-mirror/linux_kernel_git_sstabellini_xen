@@ -14,6 +14,7 @@
 #include <xen/xen-ops.h>
 #include <asm/xen/hypervisor.h>
 #include <asm/xen/hypercall.h>
+#include <asm/arch_timer.h>
 #include <asm/system_misc.h>
 #include <linux/interrupt.h>
 #include <linux/irqreturn.h>
@@ -172,6 +173,8 @@ static int __init xen_secondary_init(unsigned int cpu)
 		   later ones fail to. */
 		per_cpu(xen_vcpu, cpu) = vcpup;
 	}
+
+	xen_setup_runstate_info(cpu);
 	return 0;
 }
 
@@ -272,6 +275,7 @@ static int __init xen_guest_init(void)
 	if (!xen_initial_domain())
 		xenbus_probe(NULL);
 
+	arch_timer_stolen_ticks = xen_stolen_accounting;
 	pm_power_off = xen_power_off;
 	arm_pm_restart = xen_restart;
 
