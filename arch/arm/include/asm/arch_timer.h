@@ -13,6 +13,11 @@
 int arch_timer_of_register(void);
 int arch_timer_sched_clock_init(void);
 
+/* per-platform function to calculate stolen ticks (clock cycles stolen
+ * to the vcpu by the hypervisor).
+ */
+extern void (*arch_timer_stolen_ticks)(void);
+
 /*
  * These register accessors are marked inline so the compiler can
  * nicely work out which register we want, and chuck away the rest of

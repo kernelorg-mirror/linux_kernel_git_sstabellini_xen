@@ -37,6 +37,8 @@ static int arch_timer_ppi[MAX_TIMER_PPI];
 
 static struct clock_event_device __percpu *arch_timer_evt;
 
+void (*arch_timer_stolen_ticks)(void);
+
 static bool arch_timer_use_virtual = true;
 
 /*
@@ -52,6 +54,10 @@ static inline irqreturn_t timer_handler(const int access,
 		ctrl |= ARCH_TIMER_CTRL_IT_MASK;
 		arch_timer_reg_write(access, ARCH_TIMER_REG_CTRL, ctrl);
 		evt->event_handler(evt);
+
+		if ( arch_timer_stolen_ticks != NULL )
+			arch_timer_stolen_ticks();
+
 		return IRQ_HANDLED;
 	}
 
