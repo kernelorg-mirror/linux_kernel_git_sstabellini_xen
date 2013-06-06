@@ -31,63 +31,31 @@
  */
 
 /*
- * The Xen hypercall calling convention is very similar to the ARM
- * procedure calling convention: the first paramter is passed in r0, the
- * second in r1, the third in r2 and the fourth in r3. Considering that
- * Xen hypercalls have 5 arguments at most, the fifth paramter is passed
- * in r4, differently from the procedure calling convention of using the
- * stack for that case.
+ * The Xen hypercall calling convention is very similar to the ARM/ARM64
+ * procedure calling convention: the first parameter is passed in r0/x0,
+ * the second in r1/x1, the third in r2/x2 and the fourth in r3/x3.
+ * Considering that Xen hypercalls have 5 arguments at most, the fifth
+ * parameter is always passed in r4/x4.
  *
- * The hypercall number is passed in r12.
+ * The hypercall number is passed in r12/x16.
  *
- * The return value is in r0.
+ * The return value is in r0/x0.
  *
- * The hvc ISS is required to be 0xEA1, that is the Xen specific ARM
- * hypercall tag.
+ * The hvc ISS is required to be 0xEA1, that is the Xen specific
+ * ARM/ARM64 hypercall tag.
  */
 
 #include <linux/linkage.h>
 #include <asm/assembler.h>
-#include <asm/opcodes-virt.h>
 #include <xen/interface/xen.h>
 
 
 #define XEN_IMM 0xEA1
 
-#define HYPERCALL_SIMPLE(hypercall)		\
-ENTRY(HYPERVISOR_##hypercall)			\
-	mov r12, #__HYPERVISOR_##hypercall;	\
-	__HVC(XEN_IMM);						\
-	mov pc, lr;							\
-ENDPROC(HYPERVISOR_##hypercall)
 
-#define HYPERCALL0 HYPERCALL_SIMPLE
-#define HYPERCALL1 HYPERCALL_SIMPLE
-#define HYPERCALL2 HYPERCALL_SIMPLE
-#define HYPERCALL3 HYPERCALL_SIMPLE
-#define HYPERCALL4 HYPERCALL_SIMPLE
+#ifdef CONFIG_ARM
 
-#define HYPERCALL5(hypercall)			\
-ENTRY(HYPERVISOR_##hypercall)			\
-	stmdb sp!, {r4}						\
-	ldr r4, [sp, #4]					\
-	mov r12, #__HYPERVISOR_##hypercall;	\
-	__HVC(XEN_IMM);						\
-	ldm sp!, {r4}						\
-	mov pc, lr							\
-ENDPROC(HYPERVISOR_##hypercall)
-
-                .text
-
-HYPERCALL2(xen_version);
-HYPERCALL3(console_io);
-HYPERCALL3(grant_table_op);
-HYPERCALL2(sched_op);
-HYPERCALL2(event_channel_op);
-HYPERCALL2(hvm_op);
-HYPERCALL2(memory_op);
-HYPERCALL2(physdev_op);
-HYPERCALL3(vcpu_op);
+#include <asm/opcodes-virt.h>
 
 ENTRY(privcmd_call)
 	stmdb sp!, {r4}
@@ -101,3 +69,64 @@ ENTRY(privcmd_call)
 	ldm sp!, {r4}
 	mov pc, lr
 ENDPROC(privcmd_call);
+
+#define HYPERCALL_SIMPLE(hypercall)		\
+ENTRY(HYPERVISOR_##hypercall)			\
+	mov r12, #__HYPERVISOR_##hypercall;	\
+	__HVC(XEN_IMM);				\
+	mov pc, lr;				\
+ENDPROC(HYPERVISOR_##hypercall)
+
+#define HYPERCALL5(hypercall)			\
+ENTRY(HYPERVISOR_##hypercall)			\
+	stmdb sp!, {r4}				\
+	ldr r4, [sp, #4]			\
+	mov r12, #__HYPERVISOR_##hypercall;	\
+	__HVC(XEN_IMM);				\
+	ldm sp!, {r4}				\
+	mov pc, lr				\
+ENDPROC(HYPERVISOR_##hypercall)
+
+#else /* ARM64 specific code below */
+
+ENTRY(privcmd_call)
+	mov x16, x0
+	mov x0, x1
+	mov x1, x2
+	mov x2, x3
+	mov x3, x4
+	mov x4, x5
+	hvc XEN_IMM
+	ret
+ENDPROC(privcmd_call);
+
+#define HYPERCALL_SIMPLE(hypercall)		\
+ENTRY(HYPERVISOR_##hypercall)			\
+	mov x16, #__HYPERVISOR_##hypercall;	\
+	hvc XEN_IMM;				\
+	ret;					\
+ENDPROC(HYPERVISOR_##hypercall)
+
+#define HYPERCALL5 HYPERCALL_SIMPLE
+#endif
+
+
+#define HYPERCALL0 HYPERCALL_SIMPLE
+#define HYPERCALL1 HYPERCALL_SIMPLE
+#define HYPERCALL2 HYPERCALL_SIMPLE
+#define HYPERCALL3 HYPERCALL_SIMPLE
+#define HYPERCALL4 HYPERCALL_SIMPLE
+
+
+                .text
+
+HYPERCALL2(xen_version);
+HYPERCALL3(console_io);
+HYPERCALL3(grant_table_op);
+HYPERCALL2(sched_op);
+HYPERCALL2(event_channel_op);
+HYPERCALL2(hvm_op);
+HYPERCALL2(memory_op);
+HYPERCALL2(physdev_op);
+HYPERCALL3(vcpu_op);
+
