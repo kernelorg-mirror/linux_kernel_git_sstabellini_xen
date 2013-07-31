@@ -325,7 +325,7 @@ static dma_addr_t dmabounce_map_page(struct device *dev, struct page *page,
 		return DMA_ERROR_CODE;
 
 	if (ret == 0) {
-		arm_dma_ops.sync_single_for_device(dev, dma_addr, size, dir);
+		dma_ops->sync_single_for_device(dev, dma_addr, size, dir);
 		return dma_addr;
 	}
 
@@ -353,7 +353,7 @@ static void dmabounce_unmap_page(struct device *dev, dma_addr_t dma_addr, size_t
 
 	buf = find_safe_buffer_dev(dev, dma_addr, __func__);
 	if (!buf) {
-		arm_dma_ops.sync_single_for_cpu(dev, dma_addr, size, dir);
+		dma_ops->sync_single_for_cpu(dev, dma_addr, size, dir);
 		return;
 	}
 
@@ -397,7 +397,7 @@ static void dmabounce_sync_for_cpu(struct device *dev,
 	if (!__dmabounce_sync_for_cpu(dev, handle, size, dir))
 		return;
 
-	arm_dma_ops.sync_single_for_cpu(dev, handle, size, dir);
+	dma_ops->sync_single_for_cpu(dev, handle, size, dir);
 }
 
 static int __dmabounce_sync_for_device(struct device *dev, dma_addr_t addr,
@@ -437,7 +437,7 @@ static void dmabounce_sync_for_device(struct device *dev,
 	if (!__dmabounce_sync_for_device(dev, handle, size, dir))
 		return;
 
-	arm_dma_ops.sync_single_for_device(dev, handle, size, dir);
+	dma_ops->sync_single_for_device(dev, handle, size, dir);
 }
 
 static int dmabounce_set_mask(struct device *dev, u64 dma_mask)
@@ -445,7 +445,7 @@ static int dmabounce_set_mask(struct device *dev, u64 dma_mask)
 	if (dev->archdata.dmabounce)
 		return 0;
 
-	return arm_dma_ops.set_dma_mask(dev, dma_mask);
+	return dma_ops->set_dma_mask(dev, dma_mask);
 }
 
 static struct dma_map_ops dmabounce_ops = {
