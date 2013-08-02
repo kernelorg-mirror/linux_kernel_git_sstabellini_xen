@@ -195,21 +195,19 @@ static void xen_power_off(void)
  * documentation of the Xen Device Tree format.
  */
 #define GRANT_TABLE_PHYSADDR 0
-static int __init xen_guest_init(void)
+void __init xen_early_init(void)
 {
-	struct xen_add_to_physmap xatp;
-	static struct shared_info *shared_info_page = 0;
+	struct resource res;
 	struct device_node *node;
 	int len;
 	const char *s = NULL;
 	const char *version = NULL;
 	const char *xen_prefix = "xen,xen-";
-	struct resource res;
 
 	node = of_find_compatible_node(NULL, NULL, "xen,xen");
 	if (!node) {
 		pr_debug("No Xen support\n");
-		return 0;
+		return;
 	}
 	s = of_get_property(node, "compatible", &len);
 	if (strlen(xen_prefix) + 3  < len &&
@@ -217,10 +215,10 @@ static int __init xen_guest_init(void)
 		version = s + strlen(xen_prefix);
 	if (version == NULL) {
 		pr_debug("Xen version not found\n");
-		return 0;
+		return;
 	}
 	if (of_address_to_resource(node, GRANT_TABLE_PHYSADDR, &res))
-		return 0;
+		return;
 	xen_hvm_resume_frames = res.start >> PAGE_SHIFT;
 	xen_events_irq = irq_of_parse_and_map(node, 0);
 	pr_info("Xen %s support found, events_irq=%d gnttab_frame_pfn=%lx\n",
@@ -232,6 +230,15 @@ static int __init xen_guest_init(void)
 		xen_start_info->flags |= SIF_INITDOMAIN|SIF_PRIVILEGED;
 	else
 		xen_start_info->flags &= ~(SIF_INITDOMAIN|SIF_PRIVILEGED);
+}
+
+static int __init xen_guest_init(void)
+{
+	struct xen_add_to_physmap xatp;
+	static struct shared_info *shared_info_page = 0;
+
+	if (!xen_domain())
+		return 0;
 
 	if (!shared_info_page)
 		shared_info_page = (struct shared_info *)
