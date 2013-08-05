@@ -195,6 +195,7 @@ static void xen_power_off(void)
  * documentation of the Xen Device Tree format.
  */
 #define GRANT_TABLE_PHYSADDR 0
+extern int xen_mm_init(void);
 void __init xen_early_init(void)
 {
 	struct resource res;
@@ -230,6 +231,8 @@ void __init xen_early_init(void)
 		xen_start_info->flags |= SIF_INITDOMAIN|SIF_PRIVILEGED;
 	else
 		xen_start_info->flags &= ~(SIF_INITDOMAIN|SIF_PRIVILEGED);
+
+	xen_mm_init();
 }
 
 static int __init xen_guest_init(void)
