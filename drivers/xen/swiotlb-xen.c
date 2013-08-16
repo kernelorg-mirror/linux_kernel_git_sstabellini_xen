@@ -75,6 +75,24 @@ static unsigned long dma_alloc_coherent_mask(struct device *dev,
 }
 #endif
 
+#ifdef CONFIG_ARM
+static inline void *xen_swiotlb_alloc_pages(struct device *hwdev, size_t size,
+		                              dma_addr_t *dma_handle, gfp_t flags,
+									  struct dma_attrs *attrs)
+{
+	return arm_dma_ops.alloc(hwdev, size, dma_handle, flags, attrs);
+}
+#else
+static inline void *xen_swiotlb_alloc_pages(struct device *hwdev, size_t size,
+		                              dma_addr_t *dma_handle, gfp_t flags,
+									  struct dma_attrs *attrs)
+{
+	unsigned long vstart = __get_free_pages(flags, order);
+	*dma_handle = virt_to_phys(vstart);
+	return (void *)vstart;
+}
+#endif
+
 struct xen_dma_info {
 	dma_addr_t dma_addr;
 	phys_addr_t phys_addr;
@@ -261,6 +279,7 @@ xen_swiotlb_fixup(void *buf, size_t size, unsigned long nslabs)
 {
 	int i, j, rc;
 	int dma_bits;
+	phys_addr_t p = virt_to_phys(buf);
 
 	dma_bits = get_order(IO_TLB_SEGSIZE << IO_TLB_SHIFT) + PAGE_SHIFT;
 
@@ -270,7 +289,7 @@ xen_swiotlb_fixup(void *buf, size_t size, unsigned long nslabs)
 
 		do {
 			rc = xen_create_contiguous_region(
-				(unsigned long)buf + (i << IO_TLB_SHIFT),
+				p + (i << IO_TLB_SHIFT),
 				get_order(slabs << IO_TLB_SHIFT),
 				dma_bits, &xen_dma_seg[j].dma_addr);
 		} while (rc && dma_bits++ < max_dma_bits);
@@ -406,7 +425,6 @@ xen_swiotlb_alloc_coherent(struct device *hwdev, size_t size,
 	void *ret;
 	int order = get_order(size);
 	u64 dma_mask = DMA_BIT_MASK(32);
-	unsigned long vstart;
 	phys_addr_t phys;
 	dma_addr_t dev_addr;
 
@@ -421,8 +439,7 @@ xen_swiotlb_alloc_coherent(struct device *hwdev, size_t size,
 	if (dma_alloc_from_coherent(hwdev, size, dma_handle, &ret))
 		return ret;
 
-	vstart = __get_free_pages(flags, order);
-	ret = (void *)vstart;
+	ret = xen_swiotlb_alloc_pages(hwdev, size, dma_handle, flags, attrs);
 
 	if (!ret)
 		return ret;
@@ -430,16 +447,16 @@ xen_swiotlb_alloc_coherent(struct device *hwdev, size_t size,
 	if (hwdev && hwdev->coherent_dma_mask)
 		dma_mask = dma_alloc_coherent_mask(hwdev, flags);
 
-	phys = virt_to_phys(ret);
+	phys = *dma_handle;
 	dev_addr = xen_phys_to_bus(phys);
 	if (!xen_feature(XENFEAT_auto_translated_physmap) &&
 	    ((dev_addr + size - 1 <= dma_mask)) &&
 	    !range_straddles_page_boundary(phys, size))
 		*dma_handle = dev_addr;
 	else {
-		if (xen_create_contiguous_region(vstart, order,
+		if (xen_create_contiguous_region(phys, order,
 						 fls64(dma_mask), dma_handle) != 0) {
-			free_pages(vstart, order);
+			free_pages((unsigned long)ret, order);
 			return NULL;
 		}
 	}

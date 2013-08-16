@@ -55,11 +55,10 @@ static int xen_exchange_memory(xen_ulong_t extents_in,
 	return success;
 }
 
-int xen_create_contiguous_region(unsigned long vstart, unsigned int order,
+int xen_create_contiguous_region(phys_addr_t pstart, unsigned int order,
 				 unsigned int address_bits,
 				 dma_addr_t *dma_handle)
 {
-	phys_addr_t pstart = __pa(vstart);
 	xen_pfn_t in_frame, out_frame;
 	int success;
 
