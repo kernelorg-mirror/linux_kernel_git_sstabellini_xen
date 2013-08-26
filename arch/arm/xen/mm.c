@@ -111,7 +111,7 @@ static struct dma_map_ops xen_swiotlb_dma_ops = {
 
 int __init xen_mm_init(void)
 {
-	xen_swiotlb_init(1, true);
+	xen_swiotlb_init(1, false);
 	dma_ops = &xen_swiotlb_dma_ops;
 	return 0;
 }

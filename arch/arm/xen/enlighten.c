@@ -231,8 +231,6 @@ void __init xen_early_init(void)
 		xen_start_info->flags |= SIF_INITDOMAIN|SIF_PRIVILEGED;
 	else
 		xen_start_info->flags &= ~(SIF_INITDOMAIN|SIF_PRIVILEGED);
-
-	xen_mm_init();
 }
 
 static int __init xen_guest_init(void)
@@ -272,6 +270,8 @@ static int __init xen_guest_init(void)
 	if (xen_vcpu_info == NULL)
 		return -ENOMEM;
 
+
+	xen_mm_init();
 	gnttab_init();
 	if (!xen_initial_domain())
 		xenbus_probe(NULL);
