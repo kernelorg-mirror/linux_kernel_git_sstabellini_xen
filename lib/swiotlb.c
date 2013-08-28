@@ -547,7 +547,10 @@ void swiotlb_tbl_unmap_single(struct device *hwdev, phys_addr_t tlb_addr,
 	 * First, sync the memory before unmapping the entry
 	 */
 	if (orig_addr && ((dir == DMA_FROM_DEVICE) || (dir == DMA_BIDIRECTIONAL)))
+	{
+		dma_mark_clean(phys_to_virt(tlb_addr), size);
 		swiotlb_bounce(orig_addr, tlb_addr, size, DMA_FROM_DEVICE);
+	}
 
 	/*
 	 * Return the buffer to the free list by setting the corresponding
@@ -587,17 +590,20 @@ void swiotlb_tbl_sync_single(struct device *hwdev, phys_addr_t tlb_addr,
 
 	switch (target) {
 	case SYNC_FOR_CPU:
-		if (likely(dir == DMA_FROM_DEVICE || dir == DMA_BIDIRECTIONAL))
+		if (likely(dir == DMA_FROM_DEVICE || dir == DMA_BIDIRECTIONAL)) {
+			dma_mark_clean(phys_to_virt(tlb_addr), size);
 			swiotlb_bounce(orig_addr, tlb_addr,
 				       size, DMA_FROM_DEVICE);
+		}
 		else
 			BUG_ON(dir != DMA_TO_DEVICE);
 		break;
 	case SYNC_FOR_DEVICE:
-		if (likely(dir == DMA_TO_DEVICE || dir == DMA_BIDIRECTIONAL))
+		if (likely(dir == DMA_TO_DEVICE || dir == DMA_BIDIRECTIONAL)) {
 			swiotlb_bounce(orig_addr, tlb_addr,
 				       size, DMA_TO_DEVICE);
-		else
+			dma_mark_clean(phys_to_virt(tlb_addr), size);
+		} else
 			BUG_ON(dir != DMA_FROM_DEVICE);
 		break;
 	default:
