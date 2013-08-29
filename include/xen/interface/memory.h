@@ -66,6 +66,7 @@ struct xen_memory_exchange {
     /*
      * [IN] Details of memory extents to be exchanged (GMFN bases).
      * Note that @in.address_bits is ignored and unused.
+     * @out.address_bits should contain the address mask for the new pages.
      */
     struct xen_memory_reservation in;
 
@@ -262,5 +263,41 @@ struct xen_remove_from_physmap {
     xen_pfn_t gpfn;
 };
 DEFINE_GUEST_HANDLE_STRUCT(xen_remove_from_physmap);
+
+#define XENMEM_exchange_and_pin             26
+/*
+ * This hypercall is similar to XENMEM_exchange: it takes the same
+ * struct as an argument and it exchanges the pages passed in with a new
+ * set of pages. The new pages are going to be "pinned": it's guaranteed
+ * that their p2m mapping won't be changed until explicitly "unpinned".
+ * The content of the exchanged pages is lost.
+ * Only normal guest r/w memory can be pinned: no granted pages or
+ * ballooned pages.
+ * If return code is zero then @out.extent_list provides the DMA frame
+ * numbers of the newly-allocated memory.
+ * Returns zero on complete success, otherwise a negative error code:
+ *   -ENOSYS if not implemented
+ *   -EINVAL if the page is already pinned
+ *   -EFAULT if an internal error occurs
+ * On complete success then always @nr_exchanged == @in.nr_extents.  On
+ * partial success @nr_exchanged indicates how much work was done and a
+ * negative error code is returned.
+ */
+
+#define XENMEM_unpin             27
+/*
+ * XENMEM_unpin unpins a set of pages, previously pinned by
+ * XENMEM_exchange_and_pin. After this call the p2m mapping of the pages can
+ * be transparently changed by the hypervisor, as usual. The pages are
+ * still accessible from the guest.
+ */
+struct xen_unpin {
+    /*
+     * [IN] Details of memory extents to be unpinned (GMFN bases).
+     * Note that @in.address_bits is ignored and unused.
+     */
+    struct xen_memory_reservation in;
+};
+DEFINE_GUEST_HANDLE_STRUCT(xen_unpin);
 
 #endif /* __XEN_PUBLIC_MEMORY_H__ */
