@@ -469,6 +469,11 @@ static inline int desc_get_tx_ls(struct xgmac_dma_desc *p)
 	return le32_to_cpu(p->flags) & TXDESC_LAST_SEG;
 }
 
+static inline int desc_get_tx_fs(struct xgmac_dma_desc *p)
+{
+	return le32_to_cpu(p->flags) & TXDESC_FIRST_SEG;
+}
+
 static inline u32 desc_get_buf_addr(struct xgmac_dma_desc *p)
 {
 	return le32_to_cpu(p->buf1_addr);
@@ -801,7 +806,7 @@ static void xgmac_free_rx_skbufs(struct xgmac_priv *priv)
 
 static void xgmac_free_tx_skbufs(struct xgmac_priv *priv)
 {
-	int i, f;
+	int i;
 	struct xgmac_dma_desc *p;
 
 	if (!priv->tx_skbuff)
@@ -812,16 +817,15 @@ static void xgmac_free_tx_skbufs(struct xgmac_priv *priv)
 			continue;
 
 		p = priv->dma_tx + i;
-		dma_unmap_single(priv->device, desc_get_buf_addr(p),
-				 desc_get_buf_len(p), DMA_TO_DEVICE);
-
-		for (f = 0; f < skb_shinfo(priv->tx_skbuff[i])->nr_frags; f++) {
-			p = priv->dma_tx + i++;
+		if (desc_get_tx_fs(p))
+			dma_unmap_single(priv->device, desc_get_buf_addr(p),
+					 desc_get_buf_len(p), DMA_TO_DEVICE);
+		else
 			dma_unmap_page(priv->device, desc_get_buf_addr(p),
 				       desc_get_buf_len(p), DMA_TO_DEVICE);
-		}
 
-		dev_kfree_skb_any(priv->tx_skbuff[i]);
+		if (desc_get_tx_ls(p))
+			dev_kfree_skb_any(priv->tx_skbuff[i]);
 		priv->tx_skbuff[i] = NULL;
 	}
 }
@@ -858,8 +862,6 @@ static void xgmac_free_dma_desc_rings(struct xgmac_priv *priv)
  */
 static void xgmac_tx_complete(struct xgmac_priv *priv)
 {
-	int i;
-
 	while (dma_ring_cnt(priv->tx_head, priv->tx_tail, DMA_TX_RING_SZ)) {
 		unsigned int entry = priv->tx_tail;
 		struct sk_buff *skb = priv->tx_skbuff[entry];
@@ -869,33 +871,24 @@ static void xgmac_tx_complete(struct xgmac_priv *priv)
 		if (desc_get_owner(p))
 			break;
 
-		/* Verify tx error by looking at the last segment */
-		if (desc_get_tx_ls(p))
-			desc_get_tx_status(priv, p);
-
 		netdev_dbg(priv->dev, "tx ring: curr %d, dirty %d\n",
 			priv->tx_head, priv->tx_tail);
 
-		dma_unmap_single(priv->device, desc_get_buf_addr(p),
-				 desc_get_buf_len(p), DMA_TO_DEVICE);
+		if (desc_get_tx_fs(p))
+			dma_unmap_single(priv->device, desc_get_buf_addr(p),
+					 desc_get_buf_len(p), DMA_TO_DEVICE);
+		else
+			dma_unmap_page(priv->device, desc_get_buf_addr(p),
+				       desc_get_buf_len(p), DMA_TO_DEVICE);
+
+		/* Check tx error on the last segment */
+		if (desc_get_tx_ls(p)) {
+			desc_get_tx_status(priv, p);
+			dev_kfree_skb(skb);
+		}
 
 		priv->tx_skbuff[entry] = NULL;
 		priv->tx_tail = dma_ring_incr(entry, DMA_TX_RING_SZ);
-
-		if (!skb) {
-			continue;
-		}
-
-		for (i = 0; i < skb_shinfo(skb)->nr_frags; i++) {
-			entry = priv->tx_tail = dma_ring_incr(priv->tx_tail,
-							      DMA_TX_RING_SZ);
-			p = priv->dma_tx + priv->tx_tail;
-
-			dma_unmap_page(priv->device, desc_get_buf_addr(p),
-				       desc_get_buf_len(p), DMA_TO_DEVICE);
-		}
-
-		dev_kfree_skb(skb);
 	}
 
 	if (dma_ring_space(priv->tx_head, priv->tx_tail, DMA_TX_RING_SZ) >
@@ -1112,7 +1105,7 @@ static netdev_tx_t xgmac_xmit(struct sk_buff *skb, struct net_device *dev)
 
 		entry = dma_ring_incr(entry, DMA_TX_RING_SZ);
 		desc = priv->dma_tx + entry;
-		priv->tx_skbuff[entry] = NULL;
+		priv->tx_skbuff[entry] = skb;
 
 		desc_set_buf_addr_and_size(desc, paddr, len);
 		if (i < (nfrags - 1))
