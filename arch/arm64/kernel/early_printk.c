@@ -29,16 +29,16 @@
 static void __iomem *early_base;
 static void (*printch)(char ch);
 
+void xen_raw_console_write(const char *str);
 /*
  * PL011 single character TX.
  */
 static void pl011_printch(char ch)
 {
-	while (readl_relaxed(early_base + UART01x_FR) & UART01x_FR_TXFF)
-		;
-	writeb_relaxed(ch, early_base + UART01x_DR);
-	while (readl_relaxed(early_base + UART01x_FR) & UART01x_FR_BUSY)
-		;
+	char buf[2];
+	buf[0] = ch;
+	buf[1] = '\0';
+	xen_raw_console_write(buf);
 }
 
 /*

@@ -1678,24 +1678,18 @@ EXPORT_SYMBOL(printk_emit);
  *
  * See the vsnprintf() documentation for format string extensions over C99.
  */
+void xen_raw_console_write(const char *str);
 asmlinkage int printk(const char *fmt, ...)
 {
 	va_list args;
-	int r;
+	static char buf[512];
 
-#ifdef CONFIG_KGDB_KDB
-	if (unlikely(kdb_trap_printk)) {
-		va_start(args, fmt);
-		r = vkdb_printf(fmt, args);
-		va_end(args);
-		return r;
-	}
-#endif
 	va_start(args, fmt);
-	r = vprintk_emit(0, -1, NULL, 0, fmt, args);
+	vsnprintf(buf, sizeof(buf), fmt, args);
 	va_end(args);
 
-	return r;
+	xen_raw_console_write(buf);
+	return 1;
 }
 EXPORT_SYMBOL(printk);
 
