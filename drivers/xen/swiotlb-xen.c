@@ -512,7 +512,7 @@ dma_addr_t xen_swiotlb_map_page(struct device *dev, struct page *page,
 	 * buffering it.
 	 */
 	if (!xen_feature(XENFEAT_auto_translated_physmap) &&
-	    dma_capable(dev, dev_addr, size) &&
+	    dev->dma_mask && dma_capable(dev, dev_addr, size) &&
 	    !range_straddles_page_boundary(phys, size) && !swiotlb_force)
 		return dev_addr;
 
@@ -532,7 +532,7 @@ dma_addr_t xen_swiotlb_map_page(struct device *dev, struct page *page,
 	/*
 	 * Ensure that the address returned is DMA'ble
 	 */
-	if (!dma_capable(dev, dev_addr, size)) {
+	if (dev->dma_mask && !dma_capable(dev, dev_addr, size)) {
 		swiotlb_tbl_unmap_single(dev, map, size, dir);
 		dev_addr = 0;
 	}
@@ -660,7 +660,7 @@ xen_swiotlb_map_sg_attrs(struct device *hwdev, struct scatterlist *sgl,
 
 		if (swiotlb_force ||
 		    xen_feature(XENFEAT_auto_translated_physmap) ||
-		    !dma_capable(hwdev, dev_addr, sg->length) ||
+		    (hwdev->dma_mask && !dma_capable(hwdev, dev_addr, sg->length)) ||
 		    range_straddles_page_boundary(paddr, sg->length)) {
 			/*
 			 * Pass the dma_addr of the first slab in the iotlb buffer as
