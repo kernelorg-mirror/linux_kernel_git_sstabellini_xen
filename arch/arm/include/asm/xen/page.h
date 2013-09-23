@@ -6,12 +6,14 @@
 
 #include <linux/pfn.h>
 #include <linux/types.h>
+#include <linux/dma-mapping.h>
 
 #include <xen/interface/grant_table.h>
 
 #define pfn_to_mfn(pfn)			(pfn)
 #define phys_to_machine_mapping_valid(pfn) (1)
 #define mfn_to_pfn(mfn)			(mfn)
+#define mfn_to_local_pfn(m)             (mfn_to_pfn(m))
 #define mfn_to_virt(m)			(__va(mfn_to_pfn(m) << PAGE_SHIFT))
 
 #define pte_mfn	    pte_pfn
