@@ -2,6 +2,7 @@
 #include <linux/io.h>
 #include <linux/export.h>
 #include <xen/page.h>
+#include <xen/features.h>
 
 bool xen_biovec_phys_mergeable(const struct bio_vec *vec1,
 			       const struct bio_vec *vec2)
@@ -9,7 +10,8 @@ bool xen_biovec_phys_mergeable(const struct bio_vec *vec1,
 	unsigned long mfn1 = pfn_to_mfn(page_to_pfn(vec1->bv_page));
 	unsigned long mfn2 = pfn_to_mfn(page_to_pfn(vec2->bv_page));
 
-	return __BIOVEC_PHYS_MERGEABLE(vec1, vec2) &&
+	return !xen_feature(XENFEAT_auto_translated_physmap) &&
+		__BIOVEC_PHYS_MERGEABLE(vec1, vec2) &&
 		((mfn1 == mfn2) || ((mfn1+1) == mfn2));
 }
 EXPORT_SYMBOL(xen_biovec_phys_mergeable);
