@@ -314,4 +314,36 @@ struct xen_unpin {
 };
 DEFINE_GUEST_HANDLE_STRUCT(xen_unpin);
 
+/*
+ * XENMEM_pin pins a set of pages to make sure that the hypervisor does
+ * not change the p2m mappings for them.
+ *
+ */
+#define XENMEM_pin               28
+struct xen_pin {
+    /*
+     * [IN/OUT] Details of memory extents to be pinned (GMFN bases).
+     * Xen copies back the MFNs corresponding to the GMFNs passed in as
+     * argument.
+     * @in.address_bits contains the maximum number of bits addressable
+     * by the caller. If the machine addresses of the pages to be pinned
+     * are not addressable according to @in.address_bits, the hypercall
+     * fails and returns an errors. The pages are not pinned. Otherwise
+     * the hypercall succeeds.
+     */
+    struct xen_memory_reservation in;
+
+    /*
+     * [OUT] Number of input extents that were successfully pinned.
+     *  1. The first @nr_pinned input extents were successfully
+     *     pinned.
+     *  2. All other input extents are untouched.
+     *  3. If not all input extents are pinned then the return code of this
+     *     command will be non-zero.
+     */
+    xen_ulong_t nr_pinned;
+};
+DEFINE_GUEST_HANDLE_STRUCT(xen_pin);
+
+
 #endif /* __XEN_PUBLIC_MEMORY_H__ */

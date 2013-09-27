@@ -55,6 +55,22 @@ static int xen_exchange_memory(xen_ulong_t extents_in,
 	return success;
 }
 
+int xen_pin_page(xen_pfn_t *in_frame, unsigned int address_bits)
+{
+	struct xen_pin pin = {
+		.in = {
+			.nr_extents   = 1,
+			.extent_order = 0,
+			.domid        = DOMID_SELF,
+			.address_bits = address_bits
+		},
+	};
+	set_xen_guest_handle(pin.in.extent_start, in_frame);
+
+	return HYPERVISOR_memory_op(XENMEM_pin, &pin);
+}
+EXPORT_SYMBOL_GPL(xen_pin_page);
+
 int xen_create_contiguous_region(phys_addr_t pstart, unsigned int order,
 				 unsigned int address_bits,
 				 dma_addr_t *dma_handle)

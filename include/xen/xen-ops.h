@@ -22,6 +22,7 @@ extern unsigned long *xen_contiguous_bitmap;
 int xen_create_contiguous_region(phys_addr_t pstart, unsigned int order,
 				unsigned int address_bits,
 				dma_addr_t *dma_handle);
+int xen_pin_page(xen_pfn_t *in_frame, unsigned int address_bits);
 
 void xen_destroy_contiguous_region(phys_addr_t pstart, unsigned int order);
 

@@ -2568,3 +2568,10 @@ int xen_unmap_domain_mfn_range(struct vm_area_struct *vma,
 	return -EINVAL;
 }
 EXPORT_SYMBOL_GPL(xen_unmap_domain_mfn_range);
+
+int xen_pin_page(xen_pfn_t *in_frame, unsigned int address_bits)
+{
+	return -ENOSYS;
+}
+EXPORT_SYMBOL_GPL(xen_pin_page);
+
