@@ -66,6 +66,9 @@ struct xen_memory_exchange {
     /*
      * [IN] Details of memory extents to be exchanged (GMFN bases).
      * Note that @in.address_bits is ignored and unused.
+     * @out.address_bits contains the maximum number of bits addressable
+     * by the caller. The addresses of the newly allocated pages have to
+     * meet this restriction.
      */
     struct xen_memory_reservation in;
 
@@ -262,5 +265,53 @@ struct xen_remove_from_physmap {
     xen_pfn_t gpfn;
 };
 DEFINE_GUEST_HANDLE_STRUCT(xen_remove_from_physmap);
+
+/*
+ * This hypercall is similar to XENMEM_exchange: it takes the same
+ * struct as an argument and it exchanges the pages passed in with a new
+ * set of pages. The new pages are going to be "pinned": it's guaranteed
+ * that their p2m mapping won't be changed until explicitly "unpinned".
+ * Only normal guest r/w memory can be pinned: no granted pages or
+ * ballooned pages.
+ * If return code is zero then @out.extent_list provides the frame
+ * numbers of the newly-allocated memory.
+ * On X86 the frame numbers are machine frame numbers (mfns).
+ * On ARMv7 and ARMv8 the frame numbers are machine frame numbers (mfns).
+ * Returns zero on complete success, otherwise a negative error code.
+ * The most common error codes are:
+ *   -ENOSYS if not implemented
+ *   -EPERM  if the domain is not privileged for this operation
+ *   -EBUSY  if the page is already pinned
+ *   -EFAULT if an internal error occurs
+ * On complete success then always @nr_exchanged == @in.nr_extents.  On
+ * partial success @nr_exchanged indicates how much work was done and a
+ * negative error code is returned.
+ */
+#define XENMEM_exchange_and_pin             26
+
+/*
+ * XENMEM_unpin unpins a set of pages, previously pinned by
+ * XENMEM_exchange_and_pin. After this call the p2m mapping of the pages can
+ * be transparently changed by the hypervisor, as usual. The pages are
+ * still accessible from the guest.
+ */
+#define XENMEM_unpin             27
+struct xen_unpin {
+    /*
+     * [IN] Details of memory extents to be unpinned (GMFN bases).
+     * Note that @in.address_bits is ignored and unused.
+     */
+    struct xen_memory_reservation in;
+    /*
+     * [OUT] Number of input extents that were successfully unpinned.
+     *  1. The first @nr_unpinned input extents were successfully
+     *     unpinned.
+     *  2. All other input extents are untouched.
+     *  3. If not all input extents are unpinned then the return code of this
+     *     command will be non-zero.
+     */
+    xen_ulong_t nr_unpinned;
+};
+DEFINE_GUEST_HANDLE_STRUCT(xen_unpin);
 
 #endif /* __XEN_PUBLIC_MEMORY_H__ */
