@@ -87,7 +87,8 @@ struct xen_dma_info {
 	dma_addr_t dma_addr;
 	phys_addr_t phys_addr;
 	size_t size;
-	struct rb_node rbnode;
+	struct rb_node rbnode_dma;
+	struct rb_node rbnode_phys;
 };
 
 /*
@@ -104,8 +105,13 @@ static struct xen_dma_info *xen_dma_seg;
  * mappings.
  */
 static struct rb_root bus_to_phys = RB_ROOT;
+/*
+ * This tree keeps track of physical address to bus address
+ * mappings apart from the ones belonging to the initial swiotlb buffer.
+ */
+static struct rb_root phys_to_bus = RB_ROOT;
 
-static int xen_dma_add_entry(struct xen_dma_info *new)
+static int xen_dma_add_entry_bus(struct xen_dma_info *new)
 {
 	struct rb_node **link = &bus_to_phys.rb_node;
 	struct rb_node *parent = NULL;
@@ -114,7 +120,7 @@ static int xen_dma_add_entry(struct xen_dma_info *new)
 
 	while (*link) {
 		parent = *link;
-		entry = rb_entry(parent, struct xen_dma_info, rbnode);
+		entry = rb_entry(parent, struct xen_dma_info, rbnode_dma);
 
 		if (new->dma_addr == entry->dma_addr)
 			goto err_out;
@@ -126,8 +132,8 @@ static int xen_dma_add_entry(struct xen_dma_info *new)
 		else
 			link = &(*link)->rb_right;
 	}
-	rb_link_node(&new->rbnode, parent, link);
-	rb_insert_color(&new->rbnode, &bus_to_phys);
+	rb_link_node(&new->rbnode_dma, parent, link);
+	rb_insert_color(&new->rbnode_dma, &bus_to_phys);
 	goto out;
 
 err_out:
@@ -138,13 +144,55 @@ out:
 	return rc;
 }
 
+static int xen_dma_add_entry_phys(struct xen_dma_info *new)
+{
+	struct rb_node **link = &phys_to_bus.rb_node;
+	struct rb_node *parent = NULL;
+	struct xen_dma_info *entry;
+	int rc = 0;
+
+	while (*link) {
+		parent = *link;
+		entry = rb_entry(parent, struct xen_dma_info, rbnode_phys);
+
+		if (new->dma_addr == entry->dma_addr)
+			goto err_out;
+		if (new->phys_addr == entry->phys_addr)
+			goto err_out;
+
+		if (new->phys_addr < entry->phys_addr)
+			link = &(*link)->rb_left;
+		else
+			link = &(*link)->rb_right;
+	}
+	rb_link_node(&new->rbnode_phys, parent, link);
+	rb_insert_color(&new->rbnode_phys, &phys_to_bus);
+	goto out;
+
+err_out:
+	rc = -EINVAL;
+	pr_warn("%s: cannot add phys=%pa -> dma=%pa: phys=%pa -> dma=%pa already exists\n",
+			__func__, &new->phys_addr, &new->dma_addr, &entry->phys_addr, &entry->dma_addr);
+out:
+	return rc;
+}
+
+static int xen_dma_add_entry(struct xen_dma_info *new)
+{
+	int rc;
+	if ((rc = xen_dma_add_entry_bus(new) < 0) ||
+		(rc = xen_dma_add_entry_phys(new) < 0))
+		return rc;
+	return 0;
+}
+
 static struct xen_dma_info *xen_get_dma_info_from_dma(dma_addr_t dma_addr)
 {
 	struct rb_node *n = bus_to_phys.rb_node;
 	struct xen_dma_info *entry;
 
 	while (n) {
-		entry = rb_entry(n, struct xen_dma_info, rbnode);
+		entry = rb_entry(n, struct xen_dma_info, rbnode_dma);
 		if (entry->dma_addr <= dma_addr &&
 				entry->dma_addr + entry->size > dma_addr) {
 			return entry;
@@ -158,11 +206,30 @@ static struct xen_dma_info *xen_get_dma_info_from_dma(dma_addr_t dma_addr)
 	return NULL;
 }
 
-static dma_addr_t xen_phys_to_bus(phys_addr_t paddr)
+static struct xen_dma_info *xen_get_dma_info_from_phys(phys_addr_t phys)
 {
-	int nr_seg;
-	unsigned long offset;
-	char *vaddr;
+	struct rb_node *n = phys_to_bus.rb_node;
+	struct xen_dma_info *entry;
+
+	while (n) {
+		entry = rb_entry(n, struct xen_dma_info, rbnode_phys);
+		if (entry->phys_addr <= phys &&
+				entry->phys_addr + entry->size > phys) {
+			return entry;
+		}
+		if (phys < entry->phys_addr)
+			n = n->rb_left;
+		else
+			n = n->rb_right;
+	}
+
+	return NULL;
+}
+
+/* Only looks into the initial buffer allocation in case of
+ * XENFEAT_auto_translated_physmap guests. */
+static dma_addr_t xen_phys_to_bus_quick(phys_addr_t paddr) { int nr_seg;
+	unsigned long offset; char *vaddr;
 
 	if (!xen_feature(XENFEAT_auto_translated_physmap))
 		return phys_to_machine(XPADDR(paddr)).maddr;
@@ -192,7 +259,7 @@ static phys_addr_t xen_bus_to_phys(dma_addr_t baddr)
 
 static dma_addr_t xen_virt_to_bus(void *address)
 {
-	return xen_phys_to_bus(virt_to_phys(address));
+	return xen_phys_to_bus_quick(virt_to_phys(address));
 }
 
 static int check_pages_physically_contiguous(unsigned long pfn,
@@ -272,7 +339,7 @@ xen_swiotlb_fixup(void *buf, size_t size, unsigned long nslabs)
 
 		xen_dma_seg[j].phys_addr = virt_to_phys(buf + (i << IO_TLB_SHIFT));
 		xen_dma_seg[j].size = slabs << IO_TLB_SHIFT;
-		rc = xen_dma_add_entry(&xen_dma_seg[j]);
+		rc = xen_dma_add_entry_bus(&xen_dma_seg[j]);
 		if (rc != 0)
 			return rc;
 		i += slabs;
@@ -435,7 +502,7 @@ xen_swiotlb_alloc_coherent(struct device *hwdev, size_t size,
 	 * Do not use virt_to_phys(ret) because on ARM it doesn't correspond
 	 * to *dma_handle. */
 	phys = *dma_handle;
-	dev_addr = xen_phys_to_bus(phys);
+	dev_addr = xen_phys_to_bus_quick(phys);
 	if (!xen_feature(XENFEAT_auto_translated_physmap) &&
 	    ((dev_addr + size - 1 <= dma_mask)) &&
 	    !range_straddles_page_boundary(phys, size))
@@ -456,7 +523,7 @@ xen_swiotlb_alloc_coherent(struct device *hwdev, size_t size,
 		dma_info->phys_addr = phys;
 		dma_info->size = size;
 		dma_info->dma_addr = *dma_handle;
-		if (xen_dma_add_entry(dma_info)) {
+		if (xen_dma_add_entry_bus(dma_info)) {
 			pr_warn("cannot add new entry to bus_to_phys\n");
 			xen_destroy_contiguous_region(phys, order);
 			kfree(dma_info);
@@ -493,7 +560,8 @@ xen_swiotlb_free_coherent(struct device *hwdev, size_t size, void *vaddr,
 		 range_straddles_page_boundary(phys, size)))) {
 		xen_destroy_contiguous_region(phys, order);
 		dma_info = xen_get_dma_info_from_dma(dev_addr);
-		rb_erase(&dma_info->rbnode, &bus_to_phys);
+		rb_erase(&dma_info->rbnode_dma, &bus_to_phys);
+		rb_erase(&dma_info->rbnode_phys, &phys_to_bus);
 		kfree(dma_info);
 	}
 
@@ -524,7 +592,7 @@ dma_addr_t xen_swiotlb_map_page(struct device *dev, struct page *page,
 		return phys;
 	}
 
-	dev_addr = xen_phys_to_bus(phys);
+	dev_addr = xen_phys_to_bus_quick(phys);
 	/*
 	 * If the address happens to be in the device's DMA window,
 	 * we can safely return the device addr and not worry about bounce
@@ -546,7 +614,7 @@ dma_addr_t xen_swiotlb_map_page(struct device *dev, struct page *page,
 	if (map == SWIOTLB_MAP_ERROR)
 		return DMA_ERROR_CODE;
 
-	dev_addr = xen_phys_to_bus(map);
+	dev_addr = xen_phys_to_bus_quick(map);
 
 	/*
 	 * Ensure that the address returned is DMA'ble
@@ -701,7 +769,7 @@ xen_swiotlb_map_sg_attrs(struct device *hwdev, struct scatterlist *sgl,
 			continue;
 		}
 
-		dev_addr = xen_phys_to_bus(paddr);
+		dev_addr = xen_phys_to_bus_quick(paddr);
 
 		if (swiotlb_force ||
 		    xen_feature(XENFEAT_auto_translated_physmap) ||
@@ -727,7 +795,7 @@ xen_swiotlb_map_sg_attrs(struct device *hwdev, struct scatterlist *sgl,
 				sg_dma_len(sgl) = 0;
 				return DMA_ERROR_CODE;
 			}
-			sg->dma_address = xen_phys_to_bus(map);
+			sg->dma_address = xen_phys_to_bus_quick(map);
 		} else
 			sg->dma_address = dev_addr;
 		sg_dma_len(sg) = sg->length;
