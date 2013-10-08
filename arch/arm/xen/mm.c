@@ -114,8 +114,10 @@ static struct dma_map_ops xen_swiotlb_dma_ops = {
 
 int __init xen_mm_init(void)
 {
-	xen_swiotlb_init(1, false);
-	xen_dma_ops = &xen_swiotlb_dma_ops;
+	if (xen_initial_domain()) {
+		xen_swiotlb_init(1, false);
+		xen_dma_ops = &xen_swiotlb_dma_ops;
+	}
 	return 0;
 }
 arch_initcall(xen_mm_init);

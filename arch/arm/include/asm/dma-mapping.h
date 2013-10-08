@@ -28,7 +28,7 @@ static inline struct dma_map_ops *__get_dma_ops(struct device *dev)
 
 static inline struct dma_map_ops *get_dma_ops(struct device *dev)
 {
-	if (xen_domain())
+	if (xen_initial_domain())
 		return xen_dma_ops;
 	else
 		return __get_dma_ops(dev);

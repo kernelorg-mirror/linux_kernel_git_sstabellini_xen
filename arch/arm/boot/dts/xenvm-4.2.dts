@@ -17,7 +17,7 @@
 
 	chosen {
 		/* this field is going to be adjusted by the hypervisor */
-		bootargs = "console=hvc0 init=/bin/bash root=/dev/xvda1";
+		bootargs = "console=hvc0 rw init=/bin/bash root=/dev/xvda1";
 	};
 
 	cpus {
@@ -29,12 +29,25 @@
 			compatible = "arm,cortex-a15";
 			reg = <0>;
 		};
+
+		cpu@1 {
+			device_type = "cpu";
+			compatible = "arm,cortex-a15";
+			reg = <1>;
+		};
+	};
+
+	psci {
+		compatible      = "arm,psci";
+		method          = "hvc";
+		cpu_off         = <1>;
+		cpu_on          = <2>;
 	};
 
 	memory@80000000 {
 		device_type = "memory";
 		/* this field is going to be adjusted by the hypervisor */
-		reg = <0 0x80000000 0 0x08000000>;
+		reg = <0 0x80000000 0 0x8000000>;
 	};
 
 	gic: interrupt-controller@2c001000 {

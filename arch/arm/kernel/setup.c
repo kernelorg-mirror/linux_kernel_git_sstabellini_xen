@@ -848,6 +848,7 @@ void __init hyp_mode_check(void)
 #endif
 }
 
+void xen_raw_printk(const char *fmt, ...);
 void __init setup_arch(char **cmdline_p)
 {
 	struct machine_desc *mdesc;
