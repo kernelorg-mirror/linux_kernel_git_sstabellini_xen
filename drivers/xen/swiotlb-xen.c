@@ -57,6 +57,14 @@
 #define NR_DMA_SEGS  ((xen_io_tlb_nslabs + IO_TLB_SEGSIZE - 1) / IO_TLB_SEGSIZE)
 static char *xen_io_tlb_start, *xen_io_tlb_end;
 static unsigned long xen_io_tlb_nslabs;
+#if defined(CONFIG_ARM) || defined(CONFIG_ARM64)
+/* XXX: get this from device tree */
+#define dom0_11()  (xen_initial_domain() && \
+		            xen_feature(XENFEAT_auto_translated_physmap))
+#else
+#define dom0_11()  (0)
+#endif
+
 /*
  * Quick lookup value of the bus address of the IOTLB.
  */
@@ -416,6 +424,9 @@ xen_swiotlb_alloc_coherent(struct device *hwdev, size_t size,
 	if (!ret)
 		return ret;
 
+	if (dom0_11() && !swiotlb_force)
+		return ret;
+
 	if (hwdev && hwdev->coherent_dma_mask)
 		dma_mask = dma_alloc_coherent_mask(hwdev, flags);
 
@@ -476,9 +487,10 @@ xen_swiotlb_free_coherent(struct device *hwdev, size_t size, void *vaddr,
 	 * physical address */
 	phys = xen_bus_to_phys(dev_addr);
 
-	if (xen_feature(XENFEAT_auto_translated_physmap) ||
+	if (!(dom0_11() && !swiotlb_force) &&
+		(xen_feature(XENFEAT_auto_translated_physmap) ||
 		(((dev_addr + size - 1 > dma_mask)) ||
-		 range_straddles_page_boundary(phys, size))) {
+		 range_straddles_page_boundary(phys, size)))) {
 		xen_destroy_contiguous_region(phys, order);
 		dma_info = xen_get_dma_info_from_dma(dev_addr);
 		rb_erase(&dma_info->rbnode, &bus_to_phys);
@@ -503,9 +515,16 @@ dma_addr_t xen_swiotlb_map_page(struct device *dev, struct page *page,
 				struct dma_attrs *attrs)
 {
 	phys_addr_t map, phys = page_to_phys(page) + offset;
-	dma_addr_t dev_addr = xen_phys_to_bus(phys);
+	dma_addr_t dev_addr;
 
 	BUG_ON(dir == DMA_NONE);
+
+	if (dom0_11() && !swiotlb_force && dma_capable(dev, phys, size)) {
+		dma_mark_clean(phys_to_virt(phys), size);
+		return phys;
+	}
+
+	dev_addr = xen_phys_to_bus(phys);
 	/*
 	 * If the address happens to be in the device's DMA window,
 	 * we can safely return the device addr and not worry about bounce
@@ -551,9 +570,17 @@ EXPORT_SYMBOL_GPL(xen_swiotlb_map_page);
 static void xen_unmap_single(struct device *hwdev, dma_addr_t dev_addr,
 			     size_t size, enum dma_data_direction dir)
 {
-	phys_addr_t paddr = xen_bus_to_phys(dev_addr);
+	phys_addr_t paddr;
 
 	BUG_ON(dir == DMA_NONE);
+
+	if (dom0_11() && !swiotlb_force && dma_capable(hwdev, dev_addr, size)) {
+		if ((dir == DMA_FROM_DEVICE) || (dir == DMA_BIDIRECTIONAL))
+			dma_mark_clean(phys_to_virt(dev_addr), size);
+		return;
+	}
+
+	paddr = xen_bus_to_phys(dev_addr);
 
 	/* NOTE: We use dev_addr here, not paddr! */
 	if (is_xen_swiotlb_buffer(dev_addr)) {
@@ -596,9 +623,17 @@ xen_swiotlb_sync_single(struct device *hwdev, dma_addr_t dev_addr,
 			size_t size, enum dma_data_direction dir,
 			enum dma_sync_target target)
 {
-	phys_addr_t paddr = xen_bus_to_phys(dev_addr);
+	phys_addr_t paddr;
 
 	BUG_ON(dir == DMA_NONE);
+
+
+	if (dom0_11() && !swiotlb_force && dma_capable(hwdev, dev_addr, size)) {
+		dma_mark_clean(phys_to_virt(dev_addr), size);
+		return;
+	}
+
+	paddr = xen_bus_to_phys(dev_addr);
 
 	/* NOTE: We use dev_addr here, not paddr! */
 	if (is_xen_swiotlb_buffer(dev_addr)) {
@@ -656,7 +691,17 @@ xen_swiotlb_map_sg_attrs(struct device *hwdev, struct scatterlist *sgl,
 
 	for_each_sg(sgl, sg, nelems, i) {
 		phys_addr_t paddr = sg_phys(sg);
-		dma_addr_t dev_addr = xen_phys_to_bus(paddr);
+		dma_addr_t dev_addr;
+
+		if (dom0_11() && !swiotlb_force &&
+				dma_capable(hwdev, paddr, sg->length)) {
+			sg->dma_address = paddr;
+			sg_dma_len(sg) = sg->length;
+			dma_mark_clean(phys_to_virt(paddr), sg->length);
+			continue;
+		}
+
+		dev_addr = xen_phys_to_bus(paddr);
 
 		if (swiotlb_force ||
 		    xen_feature(XENFEAT_auto_translated_physmap) ||
