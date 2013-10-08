@@ -57,6 +57,7 @@
 #define NR_DMA_SEGS  ((xen_io_tlb_nslabs + IO_TLB_SEGSIZE - 1) / IO_TLB_SEGSIZE)
 static char *xen_io_tlb_start, *xen_io_tlb_end;
 static unsigned long xen_io_tlb_nslabs;
+spinlock_t swiotlb_lock;
 #if defined(CONFIG_ARM) || defined(CONFIG_ARM64)
 /* XXX: get this from device tree */
 #define dom0_11()  (xen_initial_domain() && \
@@ -180,9 +181,14 @@ out:
 static int xen_dma_add_entry(struct xen_dma_info *new)
 {
 	int rc;
+	unsigned long irqflags;
+	spin_lock_irqsave(&swiotlb_lock, irqflags);
 	if ((rc = xen_dma_add_entry_bus(new) < 0) ||
-		(rc = xen_dma_add_entry_phys(new) < 0))
+		(rc = xen_dma_add_entry_phys(new) < 0)) {
+		spin_unlock_irqrestore(&swiotlb_lock, irqflags);
 		return rc;
+	}
+	spin_unlock_irqrestore(&swiotlb_lock, irqflags);
 	return 0;
 }
 
@@ -190,11 +196,14 @@ static struct xen_dma_info *xen_get_dma_info_from_dma(dma_addr_t dma_addr)
 {
 	struct rb_node *n = bus_to_phys.rb_node;
 	struct xen_dma_info *entry;
+	unsigned long irqflags;
 
+	spin_lock_irqsave(&swiotlb_lock, irqflags);
 	while (n) {
 		entry = rb_entry(n, struct xen_dma_info, rbnode_dma);
 		if (entry->dma_addr <= dma_addr &&
 				entry->dma_addr + entry->size > dma_addr) {
+			spin_unlock_irqrestore(&swiotlb_lock, irqflags);
 			return entry;
 		}
 		if (dma_addr < entry->dma_addr)
@@ -202,6 +211,7 @@ static struct xen_dma_info *xen_get_dma_info_from_dma(dma_addr_t dma_addr)
 		else
 			n = n->rb_right;
 	}
+	spin_unlock_irqrestore(&swiotlb_lock, irqflags);
 
 	return NULL;
 }
@@ -210,11 +220,14 @@ static struct xen_dma_info *xen_get_dma_info_from_phys(phys_addr_t phys)
 {
 	struct rb_node *n = phys_to_bus.rb_node;
 	struct xen_dma_info *entry;
+	unsigned long irqflags;
 
+	spin_lock_irqsave(&swiotlb_lock, irqflags);
 	while (n) {
 		entry = rb_entry(n, struct xen_dma_info, rbnode_phys);
 		if (entry->phys_addr <= phys &&
 				entry->phys_addr + entry->size > phys) {
+			spin_unlock_irqrestore(&swiotlb_lock, irqflags);
 			return entry;
 		}
 		if (phys < entry->phys_addr)
@@ -222,6 +235,7 @@ static struct xen_dma_info *xen_get_dma_info_from_phys(phys_addr_t phys)
 		else
 			n = n->rb_right;
 	}
+	spin_unlock_irqrestore(&swiotlb_lock, irqflags);
 
 	return NULL;
 }
@@ -442,6 +456,7 @@ retry:
 		rc = 0;
 	} else
 		rc = swiotlb_late_init_with_tbl(xen_io_tlb_start, xen_io_tlb_nslabs);
+	spin_lock_init(&swiotlb_lock);
 	return rc;
 error:
 	if (repeat--) {
@@ -558,10 +573,13 @@ xen_swiotlb_free_coherent(struct device *hwdev, size_t size, void *vaddr,
 		(xen_feature(XENFEAT_auto_translated_physmap) ||
 		(((dev_addr + size - 1 > dma_mask)) ||
 		 range_straddles_page_boundary(phys, size)))) {
+		unsigned long irqflags;
 		xen_destroy_contiguous_region(phys, order);
 		dma_info = xen_get_dma_info_from_dma(dev_addr);
+		spin_lock_irqsave(&swiotlb_lock, irqflags);
 		rb_erase(&dma_info->rbnode_dma, &bus_to_phys);
 		rb_erase(&dma_info->rbnode_phys, &phys_to_bus);
+		spin_unlock_irqrestore(&swiotlb_lock, irqflags);
 		kfree(dma_info);
 	}
 
@@ -956,12 +974,15 @@ EXPORT_SYMBOL_GPL(xen_swiotlb_introduce_grant_mapping)
 
 int xen_swiotlb_remove_grant_mapping(phys_addr_t phys)
 {
-	struct xen_dma_info *dma_info = xen_get_dma_info_from_phys(phys);
+	struct xen_dma_info *dma_info;
+	unsigned long irqflags;
 
+	dma_info = xen_get_dma_info_from_phys(phys);
 	BUG_ON(!dma_info);
-
+	spin_lock_irqsave(&swiotlb_lock, irqflags);
 	rb_erase(&dma_info->rbnode_dma, &bus_to_phys);
 	rb_erase(&dma_info->rbnode_phys, &phys_to_bus);
+	spin_unlock_irqrestore(&swiotlb_lock, irqflags);
 	kfree(dma_info);
 	return 0;
 }
