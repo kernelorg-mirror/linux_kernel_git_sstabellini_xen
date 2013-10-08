@@ -57,4 +57,10 @@ xen_swiotlb_dma_supported(struct device *hwdev, u64 mask);
 
 extern int
 xen_swiotlb_set_dma_mask(struct device *dev, u64 dma_mask);
+
+extern int
+xen_swiotlb_introduce_grant_mapping(phys_addr_t phys, phys_addr_t mach);
+
+extern int
+xen_swiotlb_remove_grant_mapping(phys_addr_t phys);
 #endif /* __LINUX_SWIOTLB_XEN_H */

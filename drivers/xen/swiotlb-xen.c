@@ -587,9 +587,18 @@ dma_addr_t xen_swiotlb_map_page(struct device *dev, struct page *page,
 
 	BUG_ON(dir == DMA_NONE);
 
-	if (dom0_11() && !swiotlb_force && dma_capable(dev, phys, size)) {
-		dma_mark_clean(phys_to_virt(phys), size);
-		return phys;
+	if (dom0_11() && !swiotlb_force) {
+		struct xen_dma_info *dma_info = xen_get_dma_info_from_phys(phys);
+
+		if (dma_info != NULL)
+			dev_addr = dma_info->dma_addr + (phys - dma_info->phys_addr);
+		else
+			dev_addr = phys;
+
+		if (dma_capable(dev, dev_addr, size)) {
+			dma_mark_clean(phys_to_virt(phys), size);
+			return phys;
+		}
 	}
 
 	dev_addr = xen_phys_to_bus_quick(phys);
@@ -642,10 +651,21 @@ static void xen_unmap_single(struct device *hwdev, dma_addr_t dev_addr,
 
 	BUG_ON(dir == DMA_NONE);
 
-	if (dom0_11() && !swiotlb_force && dma_capable(hwdev, dev_addr, size)) {
-		if ((dir == DMA_FROM_DEVICE) || (dir == DMA_BIDIRECTIONAL))
-			dma_mark_clean(phys_to_virt(dev_addr), size);
-		return;
+	if (dom0_11() && !swiotlb_force) {
+		char *vaddr = NULL;
+		struct xen_dma_info *dma_info = xen_get_dma_info_from_dma(dev_addr);
+
+		if (dma_info != NULL)
+			paddr = dma_info->phys_addr + (dev_addr - dma_info->dma_addr);
+		else
+			paddr = dev_addr;
+		vaddr = phys_to_virt(paddr);
+
+		if (!(vaddr >= xen_io_tlb_start && vaddr < xen_io_tlb_end)) {
+			if ((dir == DMA_FROM_DEVICE) || (dir == DMA_BIDIRECTIONAL))
+				dma_mark_clean(phys_to_virt(paddr), size);
+			return;
+		}
 	}
 
 	paddr = xen_bus_to_phys(dev_addr);
@@ -696,9 +716,20 @@ xen_swiotlb_sync_single(struct device *hwdev, dma_addr_t dev_addr,
 	BUG_ON(dir == DMA_NONE);
 
 
-	if (dom0_11() && !swiotlb_force && dma_capable(hwdev, dev_addr, size)) {
-		dma_mark_clean(phys_to_virt(dev_addr), size);
-		return;
+	if (dom0_11() && !swiotlb_force) {
+		struct xen_dma_info *dma_info = xen_get_dma_info_from_dma(dev_addr);
+		char *vaddr = NULL;
+
+		if (dma_info != NULL)
+			paddr = dma_info->phys_addr + (dev_addr - dma_info->dma_addr);
+		else
+			paddr = dev_addr;
+		vaddr = phys_to_virt(paddr);
+	
+		if (!(vaddr >= xen_io_tlb_start && vaddr < xen_io_tlb_end)) {
+			dma_mark_clean(vaddr, size);
+			return;
+		}
 	}
 
 	paddr = xen_bus_to_phys(dev_addr);
@@ -761,12 +792,20 @@ xen_swiotlb_map_sg_attrs(struct device *hwdev, struct scatterlist *sgl,
 		phys_addr_t paddr = sg_phys(sg);
 		dma_addr_t dev_addr;
 
-		if (dom0_11() && !swiotlb_force &&
-				dma_capable(hwdev, paddr, sg->length)) {
-			sg->dma_address = paddr;
-			sg_dma_len(sg) = sg->length;
-			dma_mark_clean(phys_to_virt(paddr), sg->length);
-			continue;
+		if (dom0_11() && !swiotlb_force) {
+			struct xen_dma_info *dma_info = xen_get_dma_info_from_phys(paddr);
+
+			if (dma_info != NULL)
+				dev_addr = dma_info->dma_addr + (paddr - dma_info->phys_addr);
+			else
+				dev_addr = paddr;
+
+			if (dma_capable(hwdev, dev_addr, sg->length)) {
+				sg->dma_address = dev_addr;
+				sg_dma_len(sg) = sg->length;
+				dma_mark_clean(phys_to_virt(paddr), sg->length);
+				continue;
+			}
 		}
 
 		dev_addr = xen_phys_to_bus_quick(paddr);
@@ -891,3 +930,39 @@ xen_swiotlb_set_dma_mask(struct device *dev, u64 dma_mask)
 	return 0;
 }
 EXPORT_SYMBOL_GPL(xen_swiotlb_set_dma_mask);
+
+int xen_swiotlb_introduce_grant_mapping(phys_addr_t phys, phys_addr_t mach)
+{
+	struct xen_dma_info *dma_info;
+	BUG_ON(phys & ~PAGE_MASK);
+	BUG_ON(mach & ~PAGE_MASK);
+
+	dma_info = kzalloc(sizeof(struct xen_dma_info), GFP_NOWAIT);
+	if (!dma_info) {
+		pr_warn("cannot allocate xen_dma_info\n");
+		return -ENOMEM;
+	}
+	dma_info->phys_addr = phys;
+	dma_info->size = PAGE_SIZE;
+	dma_info->dma_addr = mach;
+	if (xen_dma_add_entry(dma_info)) {
+		pr_warn("cannot add new entry to bus_to_phys\n");
+		kfree(dma_info);
+		return -EFAULT;
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(xen_swiotlb_introduce_grant_mapping)
+
+int xen_swiotlb_remove_grant_mapping(phys_addr_t phys)
+{
+	struct xen_dma_info *dma_info = xen_get_dma_info_from_phys(phys);
+
+	BUG_ON(!dma_info);
+
+	rb_erase(&dma_info->rbnode_dma, &bus_to_phys);
+	rb_erase(&dma_info->rbnode_phys, &phys_to_bus);
+	kfree(dma_info);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(xen_swiotlb_remove_grant_mapping)
