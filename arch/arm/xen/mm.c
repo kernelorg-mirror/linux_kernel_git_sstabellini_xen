@@ -1,0 +1,116 @@
+#include <linux/bootmem.h>
+#include <linux/gfp.h>
+#include <linux/export.h>
+#include <linux/slab.h>
+#include <linux/types.h>
+#include <linux/dma-mapping.h>
+#include <linux/vmalloc.h>
+#include <linux/swiotlb.h>
+
+#include <xen/xen.h>
+#include <xen/interface/memory.h>
+#include <xen/swiotlb-xen.h>
+
+#include <asm/cacheflush.h>
+#include <asm/xen/page.h>
+#include <asm/xen/hypercall.h>
+#include <asm/xen/interface.h>
+
+static int xen_exchange_memory(xen_ulong_t extents_in,
+			       unsigned int order_in,
+			       xen_pfn_t *pfns_in,
+			       xen_ulong_t extents_out,
+			       unsigned int order_out,
+			       xen_pfn_t *mfns_out,
+			       unsigned int address_bits)
+{
+	long rc;
+	int success;
+
+	struct xen_memory_exchange exchange = {
+		.in = {
+			.nr_extents   = extents_in,
+			.extent_order = order_in,
+			.domid        = DOMID_SELF
+		},
+		.out = {
+			.nr_extents   = extents_out,
+			.extent_order = order_out,
+			.address_bits = address_bits,
+			.domid        = DOMID_SELF
+		},
+		.nr_exchanged = 0
+	};
+	set_xen_guest_handle(exchange.in.extent_start, pfns_in);
+	set_xen_guest_handle(exchange.out.extent_start, mfns_out);
+
+	BUG_ON(extents_in << order_in != extents_out << order_out);
+
+
+	rc = HYPERVISOR_memory_op(XENMEM_exchange, &exchange);
+	success = (exchange.nr_exchanged == extents_in);
+
+	BUG_ON(!success && ((exchange.nr_exchanged != 0) || (rc == 0)));
+	BUG_ON(success && (rc != 0));
+
+	return success;
+}
+
+int xen_create_contiguous_region(unsigned long vstart, unsigned int order,
+				 unsigned int address_bits,
+				 dma_addr_t *dma_handle)
+{
+	phys_addr_t pstart = __pa(vstart);
+	xen_pfn_t in_frame, out_frame;
+	int success;
+
+	/* Get a new contiguous memory extent. */
+	in_frame = out_frame = pstart >> PAGE_SHIFT;
+	success = xen_exchange_memory(1, order, &in_frame,
+				      1, order, &out_frame,
+				      address_bits);
+
+	if (!success)
+		return -ENOMEM;
+	else
+		__set_phys_to_machine_multi(pstart >> PAGE_SHIFT, out_frame, (1 << order));
+
+	*dma_handle = out_frame << PAGE_SHIFT;
+
+	return success ? 0 : -ENOMEM;
+}
+EXPORT_SYMBOL_GPL(xen_create_contiguous_region);
+
+void xen_destroy_contiguous_region(unsigned long vstart, unsigned int order)
+{
+	return;
+}
+EXPORT_SYMBOL_GPL(xen_destroy_contiguous_region);
+
+struct dma_map_ops *xen_dma_ops;
+EXPORT_SYMBOL_GPL(xen_dma_ops);
+
+static struct dma_map_ops xen_swiotlb_dma_ops = {
+	.mapping_error = xen_swiotlb_dma_mapping_error,
+	.alloc = xen_swiotlb_alloc_coherent,
+	.free = xen_swiotlb_free_coherent,
+	.sync_single_for_cpu = xen_swiotlb_sync_single_for_cpu,
+	.sync_single_for_device = xen_swiotlb_sync_single_for_device,
+	.sync_sg_for_cpu = xen_swiotlb_sync_sg_for_cpu,
+	.sync_sg_for_device = xen_swiotlb_sync_sg_for_device,
+	.map_sg = xen_swiotlb_map_sg_attrs,
+	.unmap_sg = xen_swiotlb_unmap_sg_attrs,
+	.map_page = xen_swiotlb_map_page,
+	.unmap_page = xen_swiotlb_unmap_page,
+	.dma_supported = xen_swiotlb_dma_supported,
+};
+
+int __init xen_mm_init(void)
+{
+	if (!xen_initial_domain())
+		return 0;
+	xen_swiotlb_init(1, false);
+	xen_dma_ops = &xen_swiotlb_dma_ops;
+	return 0;
+}
+arch_initcall(xen_mm_init);
