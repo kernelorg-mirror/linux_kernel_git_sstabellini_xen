@@ -426,8 +426,8 @@ static void xen_unmap_single(struct device *hwdev, dma_addr_t dev_addr,
 
 	xen_dma_unmap_page(hwdev, paddr, size, dir, attrs);
 
-	/* NOTE: We use dev_addr here, not paddr! */
-	if (is_xen_swiotlb_buffer(dev_addr)) {
+	if (paddr >= virt_to_phys(xen_io_tlb_start) &&
+		paddr < virt_to_phys(xen_io_tlb_end)) {
 		swiotlb_tbl_unmap_single(hwdev, paddr, size, dir);
 		return;
 	}
