@@ -87,6 +87,7 @@ obj-$(CONFIG_ARM_CPU_TOPOLOGY)  += topology.o
 ifneq ($(CONFIG_ARCH_EBSA110),y)
   obj-y		+= io.o
 endif
+obj-$(CONFIG_PARAVIRT)	+= paravirt.o
 
 head-y			:= head$(MMUEXT).o
 obj-$(CONFIG_DEBUG_LL)	+= debug.o
@@ -97,5 +98,6 @@ ifeq ($(CONFIG_ARM_PSCI),y)
 obj-y				+= psci.o
 obj-$(CONFIG_SMP)		+= psci_smp.o
 endif
+obj-$(CONFIG_PARAVIRT)	+= paravirt.o
 
 extra-y := $(head-y) vmlinux.lds
