@@ -15,6 +15,7 @@
 #include <linux/vmalloc.h>
 #include <linux/fs.h>
 #include <linux/bootmem.h>
+#include <asm/fpu.h>
 #include <asm/page.h>
 #include <asm/cacheflush.h>
 #include <asm/mmu_context.h>
@@ -412,6 +413,8 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu, struct kvm_run *run)
 			kvm_mips_complete_mmio_load(vcpu, run);
 		vcpu->mmio_needed = 0;
 	}
+
+	lose_fpu(1);
 
 	local_irq_disable();
 	/* Check if we have any exceptions/interrupts pending */
@@ -1028,9 +1031,6 @@ void kvm_mips_set_c0_status(void)
 {
 	uint32_t status = read_c0_status();
 
-	if (cpu_has_fpu)
-		status |= (ST0_CU1);
-
 	if (cpu_has_dsp)
 		status |= (ST0_MX);
 
@@ -1154,6 +1154,10 @@ int kvm_mips_handle_exit(struct kvm_run *run, struct kvm_vcpu *vcpu)
 		++vcpu->stat.break_inst_exits;
 		trace_kvm_exit(vcpu, BREAK_INST_EXITS);
 		ret = kvm_mips_callbacks->handle_break(vcpu);
+		break;
+
+	case T_MSADIS:
+		ret = kvm_mips_callbacks->handle_msa_disabled(vcpu);
 		break;
 
 	default:

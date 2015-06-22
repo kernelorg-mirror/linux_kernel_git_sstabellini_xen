@@ -9313,7 +9313,7 @@ static int intel_crtc_page_flip(struct drm_crtc *crtc,
 
 	if (IS_VALLEYVIEW(dev)) {
 		ring = &dev_priv->ring[BCS];
-	} else if (IS_IVYBRIDGE(dev)) {
+	} else if (IS_IVYBRIDGE(dev) || IS_HASWELL(dev)) {
 		ring = &dev_priv->ring[BCS];
 	} else if (INTEL_INFO(dev)->gen >= 7) {
 		ring = obj->ring;
@@ -11703,6 +11703,9 @@ static struct intel_quirk intel_quirks[] = {
 
 	/* HP Chromebook 14 (Celeron 2955U) */
 	{ 0x0a06, 0x103c, 0x21ed, quirk_backlight_present },
+
+	/* Dell Chromebook 11 */
+	{ 0x0a06, 0x1028, 0x0a35, quirk_backlight_present },
 };
 
 static void intel_init_quirks(struct drm_device *dev)

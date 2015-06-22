@@ -878,6 +878,7 @@ struct vlv_s0ix_state {
 	/* Display 2 CZ domain */
 	u32 gu_ctl0;
 	u32 gu_ctl1;
+	u32 pcbr;
 	u32 clock_gate_dis2;
 };
 
@@ -1899,8 +1900,8 @@ struct drm_i915_cmd_table {
 #define IS_HSW_EARLY_SDV(dev)	(IS_HASWELL(dev) && \
 				 ((dev)->pdev->device & 0xFF00) == 0x0C00)
 #define IS_BDW_ULT(dev)		(IS_BROADWELL(dev) && \
-				 (((dev)->pdev->device & 0xf) == 0x2  || \
-				 ((dev)->pdev->device & 0xf) == 0x6 || \
+				 (((dev)->pdev->device & 0xf) == 0x6 || \
+				 ((dev)->pdev->device & 0xf) == 0xb  || \
 				 ((dev)->pdev->device & 0xf) == 0xe))
 #define IS_HSW_ULT(dev)		(IS_HASWELL(dev) && \
 				 ((dev)->pdev->device & 0xFF00) == 0x0A00)
