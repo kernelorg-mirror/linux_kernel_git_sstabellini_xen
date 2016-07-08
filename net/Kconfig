@@ -109,6 +109,12 @@ config NETWORK_PHY_TIMESTAMPING
 
 	  If you are unsure how to answer this question, answer N.
 
+config XENSOCK
+	bool "XenSock paravirtualized sockets for Xen"
+	depends on INET && XEN
+	help
+	  Xen paravirtualized protocol for INET stream sockets.
+
 menuconfig NETFILTER
 	bool "Network packet filtering framework (Netfilter)"
 	---help---
