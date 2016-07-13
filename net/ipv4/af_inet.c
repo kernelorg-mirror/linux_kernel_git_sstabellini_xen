@@ -120,6 +120,7 @@
 #include <linux/mroute.h>
 #endif
 #include <net/l3mdev.h>
+#include <net/xensock.h>
 
 
 /* The inetsw table contains everything that inet_create needs to
@@ -1774,6 +1775,11 @@ static int __init inet_init(void)
 	/* Register the socket-side information for inet_create. */
 	for (r = &inetsw[0]; r < &inetsw[SOCK_MAX]; ++r)
 		INIT_LIST_HEAD(r);
+
+	if (xensock) {
+		pr_info("Enabling xensock for AF_INET SOCK_STREAM\n");
+		inetsw_array[0].ops = &xensock_stream_ops;
+	}
 
 	for (q = inetsw_array; q < &inetsw_array[INETSW_ARRAY_LEN]; ++q)
 		inet_register_protosw(q);
