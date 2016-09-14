@@ -69,6 +69,14 @@ struct sock_mapping {
 	wait_queue_head_t inflight_conn_req;
 };
 
+struct pvcalls_recycle {
+	struct list_head list;
+	struct pvcalls_data_intf *intf;
+	grant_ref_t ref;
+	void *bytes;
+	int evtchn;
+};
+
 #define PVCALLS_NR_REQ_PER_RING __CONST_RING_SIZE(xen_pvcalls, XEN_PAGE_SIZE)
 
 struct pvcalls_front_priv {
@@ -82,6 +90,10 @@ struct pvcalls_front_priv {
 
 	wait_queue_head_t inflight_req;
 	struct xen_pvcalls_response rsp[PVCALLS_NR_REQ_PER_RING];
+
+	struct list_head pvcalls_front_free_datarings;
+#define MAX_FREE_DATARINGS 64
+	unsigned int free_datarings_count;
 };
 struct xenbus_device *pvcalls_front_dev;
 
@@ -134,9 +146,10 @@ static int pvcalls_front_write_wait(struct sock_mapping *map)
 	return pvcalls_ring_queued(prod, cons, size);
 }
 
-static void pvcalls_front_free_map(struct pvcalls_front_priv *priv, struct sock_mapping *map)
+static void pvcalls_front_free_map(struct pvcalls_front_priv *priv, struct sock_mapping *map, int reuse)
 {
 	int i;
+	struct pvcalls_recycle *r = NULL;
 
 	if (waitqueue_active(&map->inflight_conn_req))
 		return;
@@ -144,12 +157,29 @@ static void pvcalls_front_free_map(struct pvcalls_front_priv *priv, struct sock_
 	if (!list_empty(&map->list))
 		list_del_init(&map->list);
 	spin_unlock(&priv->pvcallss_lock);
-	unbind_from_irqhandler(map->irq, map);
-	/* what if the thread waiting still need access? */
-	for (i = 0; i < (1 << map->ring->ring_order); i++)
-		gnttab_end_foreign_access(map->ring->ref[i], 0, 0);
-	gnttab_end_foreign_access(map->ref, 0, 0);
-	free_page((unsigned long)map->ring);
+
+	if (reuse)
+		r = kzalloc(sizeof(*r), GFP_KERNEL);
+	/* no more memory - free */
+	if (r == NULL) {
+		/* what if the thread waiting still need access? */
+		for (i = 0; i < (1 << map->ring->ring_order); i++) {
+			gnttab_end_foreign_access(map->ring->ref[i], 0, 0);
+		}
+		gnttab_end_foreign_access(map->ref, 0, 0);
+		free_page((unsigned long)map->ring);
+		unbind_from_irqhandler(map->irq, map);
+	} else {
+		r->intf = map->ring;
+		r->ref = map->ref;
+		r->bytes = map->bytes;
+		r->evtchn = evtchn_from_irq(map->irq);
+		free_irq(map->irq, map);
+		spin_lock(&priv->pvcallss_lock);
+		list_add_tail(&r->list, &priv->pvcalls_front_free_datarings);
+		priv->free_datarings_count++;
+		spin_unlock(&priv->pvcallss_lock);
+	}
 	kfree(map);
 }
 
@@ -212,24 +242,52 @@ int pvcalls_front_connect(struct socket *sock, struct sockaddr *addr,
 
 	init_waitqueue_head(&map->inflight_conn_req);
 
-	map->ring = (struct pvcalls_data_intf *) __get_free_page(GFP_KERNEL | __GFP_ZERO);
-	if (map->ring == NULL) {
-		ret = -ENOMEM;
-		goto out_error;
-	}
-	memset(map->ring, 0, XEN_PAGE_SIZE);
-	map->ring->ring_order = RING_ORDER;
-	map->bytes = (void*)__get_free_pages(GFP_KERNEL | __GFP_ZERO, map->ring->ring_order);
-	if (map->bytes == NULL) {
-		ret = -ENOMEM;
-		goto out_error;
+	spin_lock(&priv->pvcallss_lock);
+	if (!list_empty(&priv->pvcalls_front_free_datarings)) {
+		struct pvcalls_recycle *r = (struct pvcalls_recycle *)
+			list_first_entry(&priv->pvcalls_front_free_datarings, struct pvcalls_recycle, list);
+
+		map->ring = r->intf;
+		BUG_ON (map->ring->ring_order != RING_ORDER);
+		map->bytes = r->bytes;
+		map->ref = r->ref;
+		evtchn = r->evtchn;
+
+		priv->free_datarings_count--;
+		list_del(&r->list);
+		spin_unlock(&priv->pvcallss_lock);
+		kfree(r);
+		map->ring->in_cons = 0;
+		map->ring->in_prod = 0;
+		map->ring->out_cons = 0;
+		map->ring->out_prod = 0;
+		map->ring->in_error = 0;
+		map->ring->out_error = 0;
+	} else {
+		spin_unlock(&priv->pvcallss_lock);
+		map->ring = (struct pvcalls_data_intf *) __get_free_page(GFP_KERNEL | __GFP_ZERO);
+		if (map->ring == NULL) {
+			ret = -ENOMEM;
+			goto out_error;
+		}
+		memset(map->ring, 0, XEN_PAGE_SIZE);
+		map->ring->ring_order = RING_ORDER;
+		map->bytes = (void*)__get_free_pages(GFP_KERNEL | __GFP_ZERO, map->ring->ring_order);
+		if (map->bytes == NULL) {
+			ret = -ENOMEM;
+			goto out_error;
+		}
+		for (i = 0; i < (1 << map->ring->ring_order); i++)
+			map->ring->ref[i] = gnttab_grant_foreign_access(pvcalls_front_dev->otherend_id, pfn_to_gfn(virt_to_pfn((void*)map->bytes) + i), 0);
+
+		map->ref = gnttab_grant_foreign_access(pvcalls_front_dev->otherend_id, pfn_to_gfn(virt_to_pfn((void*)map->ring)), 0);
+
+		ret = xenbus_alloc_evtchn(pvcalls_front_dev, &evtchn);
+		if (ret)
+			goto out_error;
 	}
 	map->data.in = map->bytes;
 	map->data.out = map->bytes + PVCALLS_RING_SIZE(map->ring->ring_order);
-
-	ret = xenbus_alloc_evtchn(pvcalls_front_dev, &evtchn);
-	if (ret)
-		goto out_error;
 	irq = bind_evtchn_to_irqhandler(evtchn, pvcalls_front_conn_handler,
 					0, "pvcalls-frontend", map);
 	if (irq < 0)
@@ -251,12 +309,7 @@ int pvcalls_front_connect(struct socket *sock, struct sockaddr *addr,
 	((struct sockaddr *)&req->u.connect.addr)->sa_family = AF_INET; /* force to AF_INET */
 	req->u.connect.len = addr_len;
 	req->u.connect.flags = flags;
-
-	for (i = 0; i < (1 << map->ring->ring_order); i++)
-		map->ring->ref[i] = gnttab_grant_foreign_access(pvcalls_front_dev->otherend_id, pfn_to_gfn(virt_to_pfn((void*)map->bytes) + i), 0);
-
-	req->u.connect.ref = gnttab_grant_foreign_access(pvcalls_front_dev->otherend_id, pfn_to_gfn(virt_to_pfn((void*)map->ring)), 0);
-	map->ref = req->u.connect.ref;
+	req->u.connect.ref = map->ref;
 	req->u.connect.evtchn = evtchn;
 	map->irq = irq;
 
@@ -505,7 +558,7 @@ int pvcalls_front_release(struct socket *sock)
 	struct pvcalls_front_priv *priv;
 	struct sock_mapping *map;
 	struct sockpass_mapping *mappass;
-	int req_id, notify;
+	int req_id, notify, reuse = 0;
 	struct xen_pvcalls_request *req;
 
 	if (!pvcalls_front_dev)
@@ -527,6 +580,7 @@ int pvcalls_front_release(struct socket *sock)
 	}
 
 	spin_lock(&priv->pvcallss_lock);
+	reuse = priv->free_datarings_count < MAX_FREE_DATARINGS;
 	req_id = priv->ring.req_prod_pvt & (RING_SIZE(&priv->ring) - 1);
 	BUG_ON(req_id >= PVCALLS_NR_REQ_PER_RING);
 	if (RING_FULL(&priv->ring) || priv->rsp[req_id].req_id != PVCALLS_INVALID_ID) {
@@ -537,6 +591,7 @@ int pvcalls_front_release(struct socket *sock)
 	req->req_id = req_id;
 	req->cmd = PVCALLS_RELEASE;
 	req->u.release.id = (uint64_t)sock;
+	req->u.release.reuse = reuse;
 
 	priv->ring.req_prod_pvt++;
 	RING_PUSH_REQUESTS_AND_CHECK_NOTIFY(&priv->ring, notify);
@@ -551,7 +606,7 @@ int pvcalls_front_release(struct socket *sock)
 		map->ring->in_error = -EBADF;
 		mb();
 		wake_up_interruptible(&map->inflight_conn_req);
-		pvcalls_front_free_map(priv, map);
+		pvcalls_front_free_map(priv, map, reuse);
 	} else {
 		mappass = (struct sockpass_mapping *) map;
 		spin_lock(&priv->pvcallss_lock);
@@ -783,23 +838,54 @@ int pvcalls_front_accept(struct socket *sock, struct socket *newsock, int flags)
 	}
 	init_waitqueue_head(&map->inflight_conn_req);
 
-	map->ring = (struct pvcalls_data_intf *) __get_free_page(GFP_KERNEL | __GFP_ZERO);
-	if (map->ring == NULL) {
-		ret = -ENOMEM;
-		goto out_error;
-	}
-	memset(map->ring, 0, XEN_PAGE_SIZE);
-	map->ring->ring_order = RING_ORDER;
-	map->bytes = (void*)__get_free_pages(GFP_KERNEL | __GFP_ZERO, map->ring->ring_order);
-	if (map->bytes == NULL) {
-		ret = -ENOMEM;
-		goto out_error;
+	spin_lock(&priv->pvcallss_lock);
+	if (!list_empty(&priv->pvcalls_front_free_datarings)) {
+		struct pvcalls_recycle *r = (struct pvcalls_recycle *)
+			list_first_entry(&priv->pvcalls_front_free_datarings, struct pvcalls_recycle, list);
+
+		map->ring = r->intf;
+		BUG_ON (map->ring->ring_order != RING_ORDER);
+		map->bytes = r->bytes;
+		map->ref = r->ref;
+		evtchn = r->evtchn;
+		
+		priv->free_datarings_count--;
+		list_del(&r->list);
+		spin_unlock(&priv->pvcallss_lock);
+		kfree(r);
+		map->ring->in_cons = 0;
+		map->ring->in_prod = 0;
+		map->ring->out_cons = 0;
+		map->ring->out_prod = 0;
+		map->ring->in_error = 0;
+		map->ring->out_error = 0;
+	} else {
+		spin_unlock(&priv->pvcallss_lock);
+		map->ring = (struct pvcalls_data_intf *) __get_free_page(GFP_KERNEL | __GFP_ZERO);
+		if (map->ring == NULL) {
+			ret = -ENOMEM;
+			goto out_error;
+		}
+		memset(map->ring, 0, XEN_PAGE_SIZE);
+		map->ring->ring_order = RING_ORDER;
+		map->bytes = (void*)__get_free_pages(GFP_KERNEL | __GFP_ZERO, map->ring->ring_order);
+		if (map->bytes == NULL) {
+			ret = -ENOMEM;
+			goto out_error;
+		}
+
+		for (i = 0; i < (1 << map->ring->ring_order); i++)
+			map->ring->ref[i] = gnttab_grant_foreign_access(pvcalls_front_dev->otherend_id, pfn_to_gfn(virt_to_pfn((void*)map->bytes) + i), 0);
+
+		map->ref = gnttab_grant_foreign_access(pvcalls_front_dev->otherend_id, pfn_to_gfn(virt_to_pfn((void*)map->ring)), 0);
+
+		ret = xenbus_alloc_evtchn(pvcalls_front_dev, &evtchn);
+		if (ret)
+			goto out_error;
 	}
 	map->data.in = map->bytes;
 	map->data.out = map->bytes + PVCALLS_RING_SIZE(map->ring->ring_order);
-	ret = xenbus_alloc_evtchn(pvcalls_front_dev, &evtchn);
-	if (ret)
-		goto out_error;
+
 	irq = bind_evtchn_to_irqhandler(evtchn, pvcalls_front_conn_handler,
 					0, "pvcalls-frontend", map);
 	if (irq < 0)
@@ -823,12 +909,7 @@ int pvcalls_front_accept(struct socket *sock, struct socket *newsock, int flags)
 	req->req_id = req_id;
 	req->cmd = PVCALLS_ACCEPT;
 	req->u.accept.id = (uint64_t) sock;
-
-	for (i = 0; i < (1 << map->ring->ring_order); i++)
-		map->ring->ref[i] = gnttab_grant_foreign_access(pvcalls_front_dev->otherend_id, pfn_to_gfn(virt_to_pfn((void*)map->bytes) + i), 0);
-
-	req->u.accept.ref = gnttab_grant_foreign_access(pvcalls_front_dev->otherend_id, pfn_to_gfn(virt_to_pfn((void*)map->ring)), 0);
-	map->ref = req->u.accept.ref;
+	req->u.accept.ref = map->ref;
 	req->u.accept.id_new = (uint64_t) newsock;
 
 	req->u.accept.evtchn = evtchn;
@@ -877,17 +958,29 @@ static int pvcalls_front_remove(struct xenbus_device *dev)
 	struct pvcalls_front_priv *priv;
 	struct sock_mapping *map = NULL, *n;
 	struct sock_mapping *mappass = NULL, *npass;
+	struct pvcalls_recycle *r, *rt;
+	int i;
 
 	priv = dev_get_drvdata(&pvcalls_front_dev->dev);
 	
 	list_for_each_entry_safe(map, n, &priv->socket_mappings, list) {
-		pvcalls_front_free_map(priv, map);
+		pvcalls_front_free_map(priv, map, 0);
 	}
 	list_for_each_entry_safe(mappass, npass, &priv->socketpass_mappings, list) {
 		spin_lock(&priv->pvcallss_lock);
 		list_del_init(&mappass->list);
 		spin_unlock(&priv->pvcallss_lock);
 		kfree(mappass);
+	}
+	list_for_each_entry_safe(r, rt, &priv->pvcalls_front_free_datarings, list) {
+		for (i = 0; i < (1 << r->intf->ring_order); i++) {
+			gnttab_end_foreign_access(r->intf->ref[i], 0, 0);
+		}
+		gnttab_end_foreign_access(r->ref, 0, 0);
+		free_page((unsigned long)r->intf);
+		evtchn_put(r->evtchn);
+		list_del(&r->list);
+		kfree(r);
 	}
 	if (priv->irq > 0)
 		unbind_from_irqhandler(priv->irq, dev);
@@ -990,6 +1083,7 @@ static int pvcalls_front_probe(struct xenbus_device *dev,
 
 	INIT_LIST_HEAD(&priv->socket_mappings);
 	INIT_LIST_HEAD(&priv->socketpass_mappings);
+	INIT_LIST_HEAD(&priv->pvcalls_front_free_datarings);
 	spin_lock_init(&priv->pvcallss_lock);
 	dev_set_drvdata(&dev->dev, priv);
 	pvcalls_front_dev = dev;
