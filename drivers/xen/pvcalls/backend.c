@@ -22,6 +22,7 @@
 #include <linux/mutex.h>
 #include <linux/rwsem.h>
 #include <linux/inet.h>
+#include <linux/hashtable.h>
 #include <net/sock.h>
 #include <net/inet_common.h>
 #include <net/inet_connection_sock.h>
@@ -59,6 +60,10 @@ struct pvcalls_back_global {
 	int nr_iothreads;
 	struct list_head privs;
 	struct rw_semaphore privs_lock;
+	DECLARE_HASHTABLE(pvcalls_back_free_datarings, 6);
+#define MAX_FREE_DATARINGS 512
+	atomic_t free_datarings_count;
+	spinlock_t free_datarings_lock;
 };
 struct pvcalls_back_global *__pvcalls;
 
@@ -70,6 +75,7 @@ struct pvcalls_back_priv {
 	int irq;
 	struct list_head socket_mappings;
 	struct radix_tree_root socketpass_mappings;
+	struct list_head reuse_buffers;
 	struct rw_semaphore pvcallss_lock;
 	wait_queue_head_t queue_work;
 	atomic_t work;
@@ -84,6 +90,7 @@ struct sock_mapping {
 	struct socket *sock;
 	int data_kthread;
 	uint64_t id;
+	grant_ref_t ref;
 	struct pvcalls_data_intf *ring;
 	void *bytes;
 	struct pvcalls_data data;
@@ -108,6 +115,15 @@ struct sockpass_mapping {
 
 static struct sock_mapping *accept_data;
 
+struct pvcalls_recycle {
+	struct hlist_node htable;
+	struct list_head list;
+	struct pvcalls_data_intf *intf;
+	grant_ref_t ref;
+	void *bytes;
+	int evtchn;
+};
+
 static irqreturn_t pvcalls_back_conn_event(int irq, void *map);
 static void pvcalls_sk_data_ready(struct sock *sock);
 static void pvcalls_sk_state_change(struct sock *sock);
@@ -115,9 +131,14 @@ static void pvcalls_pass_sk_data_ready(struct sock *sock);
 static void __pvcalls_back_accept(struct work_struct *work);
 static int pvcalls_back_release_active(struct xenbus_device *dev,
 		struct pvcalls_back_priv *priv,
-		struct sock_mapping *map);
+		struct sock_mapping *map, int reuse);
 static int backend_disconnect(struct xenbus_device *dev);
 static struct xenbus_driver pvcalls_back_driver;
+
+static inline int hash(int seed)
+{
+	return hash_32(seed, 6);
+}
 
 static int pvcalls_back_bind(struct xenbus_device *dev,
 		struct xen_pvcalls_request *req)
@@ -264,6 +285,8 @@ static int pvcalls_back_accept(struct xenbus_device *dev,
 	int ret = -EINVAL;
 	void *page = NULL;
 	struct xen_pvcalls_response *rsp;
+	struct pvcalls_recycle *r = NULL;
+	unsigned long flags;
 
 	if (dev == NULL)
 		return 0;
@@ -292,29 +315,60 @@ static int pvcalls_back_accept(struct xenbus_device *dev,
 	map->data_kthread = get_random_int() % __pvcalls->nr_iothreads;
 	printk("DEBUG %s %d data_kthread=%d\n",__func__,__LINE__,map->data_kthread);
 
-	ret = xenbus_map_ring_valloc(priv->dev, &req->u.accept.ref, 1, &page);
-	if (ret < 0)
-		goto out_error;
-	map->ring = page;
-	map->ring_order = map->ring->ring_order;
-	rmb();
-	if (map->ring_order > MAX_RING_ORDER) {
-		ret = -EFAULT;
-		goto out_error;
+	map->ref = req->u.accept.ref;
+	spin_lock_irqsave(&__pvcalls->free_datarings_lock, flags);
+	hlist_for_each_entry(r, &__pvcalls->pvcalls_back_free_datarings[hash(map->ref)], htable) {
+		if (r->ref == map->ref) {
+			hlist_del(&r->htable);
+			list_del(&r->list);
+			atomic_dec(&__pvcalls->free_datarings_count);
+			break;
+		}
 	}
-	ret = xenbus_map_ring_valloc(dev, map->ring->ref, (1 << map->ring_order), &page);
-	if (ret < 0)
-		goto out_error;
-	map->bytes = page;
-	map->data.in = page;
-	map->data.out = page + PVCALLS_RING_SIZE(map->ring_order);
+	spin_unlock_irqrestore(&__pvcalls->free_datarings_lock, flags);
+	if (r != NULL && r->ref == map->ref) {
+		map->ring = r->intf;
+		map->ring_order = map->ring->ring_order;
+		map->bytes = r->bytes;
+		map->irq = bind_evtchn_to_irqhandler(r->evtchn, pvcalls_back_conn_event, 0,
+				"pvcalls-backend", map);
+		map->ring->in_cons = 0;
+		map->ring->in_prod = 0;
+		map->ring->out_cons = 0;
+		map->ring->out_prod = 0;
+		map->ring->in_error = 0;
+		map->ring->out_error = 0;
+		kfree(r);
+		if (map->irq < 0 || map->ring_order > MAX_RING_ORDER) {
+			printk("DEBUG %s %d\n",__func__,__LINE__);
+			ret = -EFAULT;
+			goto out_error;
+		}
+	} else {
+		ret = xenbus_map_ring_valloc(priv->dev, &req->u.accept.ref, 1, &page);
+		if (ret < 0)
+			goto out_error;
+		map->ring = page;
+		map->ring_order = map->ring->ring_order;
+		rmb();
+		if (map->ring_order > MAX_RING_ORDER) {
+			ret = -EFAULT;
+			goto out_error;
+		}
+		ret = xenbus_map_ring_valloc(dev, map->ring->ref, (1 << map->ring_order), &page);
+		if (ret < 0)
+			goto out_error;
+		map->bytes = page;
 
-	ret = bind_interdomain_evtchn_to_irqhandler(dev->otherend_id, req->u.accept.evtchn,
-						    pvcalls_back_conn_event, 0,
-						    "pvcalls-backend", map);
-	if (ret < 0)
-		goto out_error;
-	map->irq = ret;
+		ret = bind_interdomain_evtchn_to_irqhandler(dev->otherend_id, req->u.accept.evtchn,
+				pvcalls_back_conn_event, 0,
+				"pvcalls-backend", map);
+		if (ret < 0)
+			goto out_error;
+		map->irq = ret;
+	}
+	map->data.in = map->bytes;
+	map->data.out = map->bytes + PVCALLS_RING_SIZE(map->ring_order);
 
 	map->priv = priv;
 	map->sockpass = mappass;
@@ -385,7 +439,7 @@ static void __pvcalls_back_accept(struct work_struct *work)
 		notify_remote_via_irq(priv->irq);
 
 	if (ret < 0) {
-		pvcalls_back_release_active(priv->dev, priv, map);
+		pvcalls_back_release_active(priv->dev, priv, map, 0);
 		return;
 	}
 
@@ -441,6 +495,8 @@ static int pvcalls_back_connect(struct xenbus_device *dev,
 	struct sock_mapping *map = NULL;
 	void *page;
 	struct xen_pvcalls_response *rsp;
+	struct pvcalls_recycle *r = NULL;
+	unsigned long flags;
 
 	if (dev == NULL)
 		return 0;
@@ -463,39 +519,71 @@ static int pvcalls_back_connect(struct xenbus_device *dev,
 	map->priv = priv;
 	map->sock = sock;
 	map->id = req->u.connect.id;
-	ret = xenbus_map_ring_valloc(dev, &req->u.connect.ref, 1, &page);
-	if (ret < 0) {
-		sock_release(map->sock);
-		kfree(map);
-		goto out;
-	}
-	map->ring = page;
-	map->ring_order = map->ring->ring_order;
-	rmb();
-	if (map->ring_order > MAX_RING_ORDER) {
-		ret = -EFAULT;
-		goto out;
-	}
-	ret = xenbus_map_ring_valloc(dev, map->ring->ref, (1 << map->ring_order), &page);
-	if (ret < 0) {
-		sock_release(map->sock);
-		xenbus_unmap_ring_vfree(dev, map->ring);
-		kfree(map);
-		goto out;
-	}
-	map->bytes = page;
-	map->data.in = page;
-	map->data.out = page + PVCALLS_RING_SIZE(map->ring_order);
+	map->ref = req->u.connect.ref;
 
-	ret = bind_interdomain_evtchn_to_irqhandler(priv->dev->otherend_id, req->u.connect.evtchn,
-						    pvcalls_back_conn_event, 0,
-						    "pvcalls-backend", map);
-	if (ret < 0) {
-		sock_release(map->sock);
-		kfree(map);
-		goto out;
+	spin_lock_irqsave(&__pvcalls->free_datarings_lock, flags);
+	hlist_for_each_entry(r, &__pvcalls->pvcalls_back_free_datarings[hash(map->ref)], htable) {
+		if (r->ref == map->ref) {
+			hlist_del(&r->htable);
+			list_del(&r->list);
+			atomic_dec(&__pvcalls->free_datarings_count);
+			break;
+		}
 	}
-	map->irq = ret;
+	spin_unlock_irqrestore(&__pvcalls->free_datarings_lock, flags);
+	if (r != NULL && r->ref == map->ref) {
+		map->ring = r->intf;
+		map->ring_order = map->ring->ring_order;
+		map->bytes = r->bytes;
+		map->irq = bind_evtchn_to_irqhandler(r->evtchn, pvcalls_back_conn_event, 0,
+				"pvcalls-backend", map);
+		kfree(r);
+		map->ring->in_cons = 0;
+		map->ring->in_prod = 0;
+		map->ring->out_cons = 0;
+		map->ring->out_prod = 0;
+		map->ring->in_error = 0;
+		map->ring->out_error = 0;
+		if (map->irq < 0 || map->ring_order > MAX_RING_ORDER) {
+			printk("DEBUG %s %d\n",__func__,__LINE__);
+			ret = -EFAULT;
+			goto out;
+		}
+	} else {
+		ret = xenbus_map_ring_valloc(dev, &req->u.connect.ref, 1, &page);
+		if (ret < 0) {
+			sock_release(map->sock);
+			kfree(map);
+			goto out;
+		}
+		map->ring = page;
+		map->ring_order = map->ring->ring_order;
+		rmb();
+		if (map->ring_order > MAX_RING_ORDER) {
+			ret = -EFAULT;
+			goto out;
+		}
+		ret = xenbus_map_ring_valloc(dev, map->ring->ref, (1 << map->ring_order), &page);
+		if (ret < 0) {
+			sock_release(map->sock);
+			xenbus_unmap_ring_vfree(dev, map->ring);
+			kfree(map);
+			goto out;
+		}
+		map->bytes = page;
+
+		ret = bind_interdomain_evtchn_to_irqhandler(priv->dev->otherend_id, req->u.connect.evtchn,
+				pvcalls_back_conn_event, 0,
+				"pvcalls-backend", map);
+		if (ret < 0) {
+			sock_release(map->sock);
+			kfree(map);
+			goto out;
+		}
+		map->irq = ret;
+	}
+	map->data.in = map->bytes;
+	map->data.out = map->bytes + PVCALLS_RING_SIZE(map->ring_order);
 
 	down_write(&priv->pvcallss_lock);
 	list_add_tail(&map->list, &priv->socket_mappings);
@@ -504,7 +592,7 @@ static int pvcalls_back_connect(struct xenbus_device *dev,
 	ret = inet_stream_connect(sock, (struct sockaddr *)&req->u.connect.addr,
 			req->u.connect.len,	req->u.connect.flags);
 	if (ret < 0) {
-		pvcalls_back_release_active(dev, priv, map);
+		pvcalls_back_release_active(dev, priv, map, 0);
 	} else {
 		map->saved_data_ready = sock->sk->sk_data_ready;
 		sock->sk->sk_user_data = map;
@@ -524,8 +612,10 @@ out:
 
 static int pvcalls_back_release_active(struct xenbus_device *dev,
 		struct pvcalls_back_priv *priv,
-		struct sock_mapping *map)
+		struct sock_mapping *map,
+		int reuse)
 {
+	struct pvcalls_recycle *r = NULL;
 	unsigned long flags;
 	int in_loop;
 
@@ -558,10 +648,29 @@ static int pvcalls_back_release_active(struct xenbus_device *dev,
 	down_write(&priv->pvcallss_lock);
 	list_del(&map->list);
 	up_write(&priv->pvcallss_lock);
-	unbind_from_irqhandler(map->irq, map);
+
+	if (reuse)
+		r = kzalloc(sizeof(*r), GFP_KERNEL);
+	/* no more memory - free */
+	if (r == NULL) {
+		xenbus_unmap_ring_vfree(dev, (void*)map->bytes);
+		xenbus_unmap_ring_vfree(dev, (void*)map->ring);
+		unbind_from_irqhandler(map->irq, map);
+	} else {
+		unsigned long flags;
+		r->intf = map->ring;
+		r->ref = map->ref;
+		r->bytes = map->bytes;
+		r->evtchn = evtchn_from_irq(map->irq);
+		free_irq(map->irq, map);
+		spin_lock_irqsave(&__pvcalls->free_datarings_lock, flags);
+		hlist_add_head(&r->htable, &__pvcalls->pvcalls_back_free_datarings[hash(map->ref)]);
+		list_add(&r->list, &priv->reuse_buffers);
+		atomic_inc(&__pvcalls->free_datarings_count);
+		spin_unlock_irqrestore(&__pvcalls->free_datarings_lock, flags);
+	}
+
 	sock_release(map->sock);
-	xenbus_unmap_ring_vfree(dev, (void*)map->bytes);
-	xenbus_unmap_ring_vfree(dev, (void*)map->ring);
 	kfree(map);
 
 	return 0;
@@ -594,14 +703,16 @@ static int pvcalls_back_release(struct xenbus_device *dev,
 	struct pvcalls_back_priv *priv;
 	struct sock_mapping *map, *n;
 	struct sockpass_mapping *mappass;
-	int ret = 0;
+	int ret = 0, reuse = 0;
 	struct xen_pvcalls_response *rsp;
 
 	priv = dev_get_drvdata(&dev->dev);
 
+	if (req->u.release.reuse)
+		reuse = atomic_read(&__pvcalls->free_datarings_count) < MAX_FREE_DATARINGS;
 	list_for_each_entry_safe(map, n, &priv->socket_mappings, list) {
 		if (map->id == req->u.release.id) {
-			ret = pvcalls_back_release_active(dev, priv, map);
+			ret = pvcalls_back_release_active(dev, priv, map, reuse);
 			goto out;
 		}
 	}
@@ -1035,6 +1146,7 @@ static int backend_connect(struct xenbus_device *dev)
 	BACK_RING_INIT(&priv->ring, priv->sring, XEN_PAGE_SIZE * 1);
 	priv->irq = err;
 	INIT_LIST_HEAD(&priv->socket_mappings);
+	INIT_LIST_HEAD(&priv->reuse_buffers);
 	INIT_RADIX_TREE(&priv->socketpass_mappings, GFP_KERNEL);
 	init_rwsem(&priv->pvcallss_lock);
 	init_waitqueue_head(&priv->queue_work);
@@ -1061,13 +1173,14 @@ static int backend_disconnect(struct xenbus_device *dev)
 	struct sock_mapping *map, *n;
 	struct sockpass_mapping *mappass;
 	struct radix_tree_iter iter;
+	struct pvcalls_recycle *r, *rt;
 	void **slot;
 	
 
 	priv = dev_get_drvdata(&dev->dev);
 
 	list_for_each_entry_safe(map, n, &priv->socket_mappings, list) {
-		pvcalls_back_release_active(dev, priv, map);
+		pvcalls_back_release_active(dev, priv, map, 0);
 	}
 	radix_tree_for_each_slot(slot, &priv->socketpass_mappings, &iter, 0) {
 		mappass = radix_tree_deref_slot(slot);
@@ -1078,6 +1191,14 @@ static int backend_disconnect(struct xenbus_device *dev)
 			}
 		} else
 			pvcalls_back_release_passive(dev, priv, mappass);
+	}
+	list_for_each_entry_safe(r, rt, &priv->reuse_buffers, list) {
+		xenbus_unmap_ring_vfree(dev, (void*)r->bytes);
+		xenbus_unmap_ring_vfree(dev, (void*)r->intf);
+		evtchn_put(r->evtchn);
+		hlist_del(&r->htable);
+		kfree(r);
+		atomic_dec(&__pvcalls->free_datarings_count);
 	}
 	xenbus_unmap_ring_vfree(dev, (void*)priv->sring);
 	unbind_from_irqhandler(priv->irq, dev);
@@ -1214,6 +1335,8 @@ static int __init pvcalls_back_init(void)
 	if (!__pvcalls)
 		goto error;
 
+	spin_lock_init(&__pvcalls->free_datarings_lock);
+	hash_init(__pvcalls->pvcalls_back_free_datarings);
 	init_rwsem(&__pvcalls->privs_lock);
 	INIT_LIST_HEAD(&__pvcalls->privs);
 	__pvcalls->nr_iothreads = num_online_cpus();
