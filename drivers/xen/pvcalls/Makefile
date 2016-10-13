@@ -1,1 +1,1 @@
-obj-y += frontend.o
+obj-y += frontend.o backend.o
