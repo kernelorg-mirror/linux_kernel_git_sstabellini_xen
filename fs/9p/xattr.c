@@ -48,7 +48,7 @@ ssize_t v9fs_fid_xattr_get(struct p9_fid *fid, const char *name,
 			retval = -ERANGE;
 	} else {
 		iov_iter_truncate(&to, attr_size);
-		retval = p9_client_read(attr_fid, 0, &to, &err);
+		retval = p9_client_read(attr_fid, NULL, 0, &to, &err);
 		if (err)
 			retval = err;
 	}
@@ -125,7 +125,7 @@ int v9fs_fid_xattr_set(struct p9_fid *fid, const char *name,
 		p9_debug(P9_DEBUG_VFS, "p9_client_xattrcreate failed %d\n",
 			 retval);
 	else
-		p9_client_write(fid, 0, &from, &retval);
+		p9_client_write(fid, NULL, 0, &from, &retval);
 	p9_client_clunk(fid);
 	return retval;
 }

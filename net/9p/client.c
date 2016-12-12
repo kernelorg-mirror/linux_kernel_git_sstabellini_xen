@@ -1536,7 +1536,8 @@ error:
 EXPORT_SYMBOL(p9_client_unlinkat);
 
 int
-p9_client_read(struct p9_fid *fid, u64 offset, struct iov_iter *to, int *err)
+p9_client_read(struct p9_fid *fid, struct kiocb *iocb, u64 offset,
+				struct iov_iter *to, int *err)
 {
 	struct p9_client *clnt = fid->clnt;
 	struct p9_req_t *req;
@@ -1616,7 +1617,8 @@ p9_client_read(struct p9_fid *fid, u64 offset, struct iov_iter *to, int *err)
 EXPORT_SYMBOL(p9_client_read);
 
 int
-p9_client_write(struct p9_fid *fid, u64 offset, struct iov_iter *from, int *err)
+p9_client_write(struct p9_fid *fid, struct kiocb *iocb, u64 offset,
+				struct iov_iter *from, int *err)
 {
 	struct p9_client *clnt = fid->clnt;
 	struct p9_req_t *req;
