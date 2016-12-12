@@ -89,11 +89,11 @@ static int p9_xen_write_todo(struct xen_9pfs_dataring *ring, XEN_9PFS_RING_IDX s
 static int p9_xen_request(struct p9_client *client, struct p9_req_t *p9_req)
 {
 	struct xen_9pfs_front_priv *priv = NULL;
-	XEN_9PFS_RING_IDX cons, prod, masked_cons, masked_prod;
+	XEN_9PFS_RING_IDX cons, cons2, prod, masked_cons, masked_prod;
 	unsigned long flags;
 	uint32_t size = p9_req->tc->size;
 	struct xen_9pfs_dataring *ring;
-	int num;
+	int num, notify = 0;
 
 	list_for_each_entry(priv, &xen_9pfs_devs, list) {
 		if (priv->client == client)
@@ -106,13 +106,17 @@ static int p9_xen_request(struct p9_client *client, struct p9_req_t *p9_req)
 	ring = &priv->rings[num];
 
 again:
+	ring->intf->out_event = 1;
+	mb();
 	while (wait_event_interruptible(ring->wq,
 				p9_xen_write_todo(ring, size) > 0) != 0);
 
+	ring->intf->out_event = 0;
+	mb();
 	spin_lock_irqsave(&ring->lock, flags);
 	cons = ring->intf->out_cons;
 	prod = ring->intf->out_prod;
-	mb();
+	rmb();
 
 	if (XEN_9PFS_RING_SIZE - xen_9pfs_ring_queued(prod, cons) < size) {
 		spin_unlock_irqrestore(&ring->lock, flags);
@@ -137,8 +141,13 @@ again:
 	p9_req->status = REQ_STATUS_SENT;
 	wmb();			/* write ring before updating pointer */
 	ring->intf->out_prod += size;
+	mb();
+	cons2 = ring->intf->out_cons;
+	if (cons2 == cons || cons2 == prod)
+		notify = 1;
 	spin_unlock_irqrestore(&ring->lock, flags);
-	notify_remote_via_irq(ring->irq);
+	if (notify)
+		notify_remote_via_irq(ring->irq);
 
 	return 0;
 }
@@ -158,10 +167,12 @@ static void p9_xen_response(struct work_struct *work)
 	while (1) {
 		cons = ring->intf->in_cons;
 		prod = ring->intf->in_prod;
-		mb();
+		rmb();
 
 		if (xen_9pfs_ring_queued(prod, cons) < sizeof(h)) {
-			notify_remote_via_irq(ring->irq);
+			mb();
+			if (ring->intf->in_event)
+				notify_remote_via_irq(ring->irq);
 			return;
 		}
 
@@ -174,8 +185,8 @@ static void p9_xen_response(struct work_struct *work)
 		if (!req || req->status != REQ_STATUS_SENT) {
 			printk("DEBUG %s %d wrong req tag=%x\n",__func__,__LINE__,h.tag);
 			cons += h.size;
-			ring->intf->in_cons = cons;
 			wmb();
+			ring->intf->in_cons = cons;
 			continue;
 		}
 
@@ -194,8 +205,8 @@ static void p9_xen_response(struct work_struct *work)
 				memcpy(req->rc->sdata, ring->ring.in + masked_cons, h.size);
 			}
 		}
-		ring->intf->in_cons += h.size;
 		wmb();
+		ring->intf->in_cons += h.size;
 
 		if (req->status != REQ_STATUS_ERROR)
 			status = REQ_STATUS_RCVD;
