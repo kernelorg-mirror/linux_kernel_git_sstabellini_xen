@@ -28,6 +28,7 @@
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
+#include <linux/pagemap.h>
 #include <linux/poll.h>
 #include <linux/idr.h>
 #include <linux/mutex.h>
@@ -1558,13 +1559,74 @@ error:
 }
 EXPORT_SYMBOL(p9_client_unlinkat);
 
+static void
+p9_client_read_complete(struct work_struct *work)
+{
+	struct p9_req_t *req = container_of(work, struct p9_req_t, work);
+	struct p9_client *clnt = req->fid->clnt;
+	uint32_t count = 0, n = 0, total = 0;
+	u64 offset;
+	int err, i;
+	char *dataptr, *to;
+
+	if (req->status == REQ_STATUS_ERROR) {
+		p9_debug(P9_DEBUG_ERROR, "req_status error %d\n", req->t_err);
+		err = req->t_err;
+		goto out;
+	}
+	err = p9_check_errors(clnt, req);
+	if (err)
+		goto out;
+
+	err = p9pdu_readf(req->rc, clnt->proto_version,
+			"D", &count, &dataptr);
+	if (err) {
+		trace_9p_protocol_dump(clnt, req->rc);
+		goto out;
+	}
+	if (!count) {
+		p9_debug(P9_DEBUG_ERROR, "count=%d\n", count);
+		err = 0;
+		goto out;
+	}
+
+	p9_debug(P9_DEBUG_9P, "<<< RREAD count %d\n", count);
+	if (count > req->rsize)
+		count = req->rsize;
+
+	offset = req->page_offset;
+	total = count;
+	for (i = offset / PAGE_SIZE; i < ((total + PAGE_SIZE - 1) / PAGE_SIZE); i++) {
+		to = kmap(req->pagevec[i]);
+		to += offset;
+		n = PAGE_SIZE - offset;
+		if (n > count)
+			n = count;
+		else
+			offset = 0;
+		memcpy(to, dataptr, n);
+		kunmap(req->pagevec[i]);
+		count -= n;
+	}
+
+	err = total;
+	req->kiocb->ki_pos += total;
+
+out:
+	req->kiocb->ki_complete(req->kiocb, err, 0);
+
+	release_pages(req->pagevec, (req->tot_size + PAGE_SIZE - 1) / PAGE_SIZE, false);
+	kvfree(req->pagevec);
+	p9_free_req(clnt, req);
+}
+
 int
 p9_client_read(struct p9_fid *fid, struct kiocb *iocb, u64 offset,
 				struct iov_iter *to, int *err)
 {
 	struct p9_client *clnt = fid->clnt;
 	struct p9_req_t *req;
-	int total = 0;
+	int total = 0, i;
 	*err = 0;
 
 	p9_debug(P9_DEBUG_9P, ">>> TREAD fid %d offset %llu %d\n",
@@ -1591,10 +1653,41 @@ p9_client_read(struct p9_fid *fid, struct kiocb *iocb, u64 offset,
 			req = p9_client_zc_rpc(clnt, P9_TREAD, to, NULL, rsize,
 					       0, 11, "dqd", fid->fid,
 					       offset, rsize);
-		} else {
+		/* sync request */
+		} else if(iocb == NULL || is_sync_kiocb(iocb)) {
 			non_zc = 1;
 			req = p9_client_rpc(clnt, P9_TREAD, "dqd", fid->fid, offset,
 					    rsize);
+		/* async request */
+		} else {
+			req = p9_client_get_req(clnt, P9_TREAD, "dqd", fid->fid, offset, rsize);
+			if (IS_ERR(req)) {
+				*err = PTR_ERR(req);
+				break;
+			}
+			req->fid = fid;
+			req->file_offset = offset;
+			req->rsize = rsize;
+			req->tot_size = iov_iter_get_pages_alloc(to, &req->pagevec, 
+					(size_t)rsize, &req->page_offset);
+			req->kiocb = iocb;
+			for (i = 0; i < req->tot_size; i += PAGE_SIZE)
+				page_cache_get_speculative(req->pagevec[i/PAGE_SIZE]);
+			INIT_WORK(&req->work, p9_client_read_complete);
+
+			*err = clnt->trans_mod->request(clnt, req);
+			if (*err < 0) {
+				clnt->status = Disconnected;
+				release_pages(req->pagevec,
+						(req->tot_size + PAGE_SIZE - 1) / PAGE_SIZE,
+						true);
+				kvfree(req->pagevec);
+				p9_free_req(clnt, req);
+				break;
+			}
+
+			*err = -EIOCBQUEUED;
+			break;
 		}
 		if (IS_ERR(req)) {
 			*err = PTR_ERR(req);
