@@ -1806,7 +1806,6 @@ p9_client_write_complete(struct work_struct *work)
 	if (count > req->rsize)
 		count = req->rsize;
 
-	err = count;
 	file = req->kiocb->ki_filp;
 	inode = file_inode(file);
 	pg_start = req->kiocb->ki_pos >> PAGE_SHIFT;
@@ -1821,9 +1820,73 @@ p9_client_write_complete(struct work_struct *work)
 		inode_add_bytes(inode, req->kiocb->ki_pos - i_size);
 		i_size_write(inode, req->kiocb->ki_pos);
 	}
+
+	req->completed += count;
+	req->file_offset += count;
+	req->page_offset += count;
+	err = req->completed;
+	if (req->tot_size - req->completed > 0 && count == req->rsize) {
+		struct p9_req_t *req2;
+		struct iov_iter from;
+		struct kvec v[(clnt->msize - P9_IOHDRSZ + PAGE_SIZE) / PAGE_SIZE];
+		u64 rsize = req->tot_size - req->completed;
+		u64 offset = req->page_offset % PAGE_SIZE;
+		u32 total = 0, n = 0;
+		int i, j;
+
+		if (rsize > req->fid->iounit)
+			rsize = req->fid->iounit;
+		if (rsize > clnt->msize-P9_IOHDRSZ)
+			rsize = clnt->msize - P9_IOHDRSZ;
+
+		for (j = 0, i = req->page_offset / PAGE_SIZE;
+				total < rsize; i++, j++) {
+			v[j].iov_base = kmap(req->pagevec[i]) + offset;
+			n = PAGE_SIZE - offset;
+			if (n > rsize - total)
+				n = rsize - total;
+			else
+				offset = 0;
+			v[j].iov_len = n;
+			total += n;
+		}
+		iov_iter_kvec(&from, WRITE|ITER_KVEC, v, i, rsize);
+
+		req2 = p9_client_get_req(clnt, P9_TWRITE, "dqV", req->fid->fid,
+				req->file_offset, rsize, &from);
+		if (IS_ERR(req2)) {
+			err = PTR_ERR(req2);
+			goto out;
+		}
+		req2->fid = req->fid;
+		req2->rsize = rsize;
+		req2->completed = req->completed;
+		req2->tot_size = req->tot_size;
+		req2->file_offset = req->file_offset;
+		req2->page_offset = req->page_offset;
+		req2->kiocb = req->kiocb;
+		req2->pagevec = req->pagevec;
+		INIT_WORK(&req2->work, p9_client_write_complete);
+
+		err = clnt->trans_mod->request(clnt, req2);
+
+		for (i -= j; j > 0; i++, j--)
+			kunmap(req2->pagevec[i]);
+
+		if (err < 0) {
+			clnt->status = Disconnected;
+			p9_free_req(clnt, req2);
+			goto out;
+		}
+		goto out2;
+	}
+
 out:
 	req->kiocb->ki_complete(req->kiocb, err, 0);
+	release_pages(req->pagevec, (req->tot_size + PAGE_SIZE - 1) / PAGE_SIZE, false);
+	kvfree(req->pagevec);
 
+out2:
 	p9_free_req(clnt, req);
 }
 
@@ -1833,7 +1896,7 @@ p9_client_write(struct p9_fid *fid, struct kiocb *iocb, u64 offset,
 {
 	struct p9_client *clnt = fid->clnt;
 	struct p9_req_t *req;
-	int total = 0;
+	int total = 0, i;
 	*err = 0;
 
 	p9_debug(P9_DEBUG_9P, ">>> TWRITE fid %d offset %llu count %zd\n",
@@ -1868,14 +1931,22 @@ p9_client_write(struct p9_fid *fid, struct kiocb *iocb, u64 offset,
 			}
 			req->fid = fid;
 			req->rsize = rsize;
-			req->tot_size = count;
 			req->file_offset = offset;
 			req->kiocb = iocb;
 			INIT_WORK(&req->work, p9_client_write_complete);
 
+			req->tot_size = iov_iter_get_pages_alloc(from, &req->pagevec,
+					(size_t)count, &req->page_offset);
+			for (i = 0; i < req->tot_size; i += PAGE_SIZE)
+				page_cache_get_speculative(req->pagevec[i/PAGE_SIZE]);
+
 			*err = clnt->trans_mod->request(clnt, req);
 			if (*err < 0) {
 				clnt->status = Disconnected;
+				release_pages(req->pagevec,
+						(req->tot_size + PAGE_SIZE - 1) / PAGE_SIZE,
+						true);
+				kvfree(req->pagevec);
 				p9_free_req(clnt, req);
 				break;
 			}
