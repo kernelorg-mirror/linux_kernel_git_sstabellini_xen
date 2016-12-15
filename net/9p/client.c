@@ -723,6 +723,18 @@ reterr:
 	return ERR_PTR(err);
 }
 
+static struct p9_req_t *
+p9_client_get_req(struct p9_client *c, int8_t type, const char *fmt, ...)
+{
+	va_list ap;
+	struct p9_req_t *req;
+
+	va_start(ap, fmt);
+	req = p9_client_prepare_req(c, type, c->msize, fmt, ap);
+	va_end(ap);
+	return req;
+}
+
 /**
  * p9_client_rpc - issue a request and wait for a response
  * @c: client session
