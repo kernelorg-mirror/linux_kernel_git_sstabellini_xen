@@ -67,7 +67,7 @@ static int v9fs_fid_readpage(struct p9_fid *fid, struct page *page)
 
 	iov_iter_bvec(&to, ITER_BVEC | READ, &bvec, 1, PAGE_SIZE);
 
-	retval = p9_client_read(fid, page_offset(page), &to, &err);
+	retval = p9_client_read(fid, NULL, page_offset(page), &to, &err);
 	if (err) {
 		v9fs_uncache_page(inode, page);
 		retval = err;
@@ -182,7 +182,7 @@ static int v9fs_vfs_writepage_locked(struct page *page)
 
 	set_page_writeback(page);
 
-	p9_client_write(v9inode->writeback_fid, page_offset(page), &from, &err);
+	p9_client_write(v9inode->writeback_fid, NULL, page_offset(page), &from, &err);
 
 	end_page_writeback(page);
 	return err;
@@ -252,7 +252,7 @@ v9fs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 	ssize_t n;
 	int err = 0;
 	if (iov_iter_rw(iter) == WRITE) {
-		n = p9_client_write(file->private_data, pos, iter, &err);
+		n = p9_client_write(file->private_data, iocb, pos, iter, &err);
 		if (n) {
 			struct inode *inode = file_inode(file);
 			loff_t i_size = i_size_read(inode);
@@ -260,7 +260,7 @@ v9fs_direct_IO(struct kiocb *iocb, struct iov_iter *iter)
 				inode_add_bytes(inode, pos + n - i_size);
 		}
 	} else {
-		n = p9_client_read(file->private_data, pos, iter, &err);
+		n = p9_client_read(file->private_data, iocb, pos, iter, &err);
 	}
 	return n ? n : err;
 }
