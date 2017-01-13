@@ -81,6 +81,7 @@ struct xen_pvcalls_request {
 		} connect;
 		struct xen_pvcalls_release {
 			uint64_t id;
+			uint8_t reuse;
 		} release;
 		struct xen_pvcalls_bind {
 			uint64_t id;
