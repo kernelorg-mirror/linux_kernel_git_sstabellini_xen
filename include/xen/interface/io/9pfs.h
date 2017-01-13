@@ -78,8 +78,8 @@ struct xen_9pfs_data {
 };
 
 struct xen_9pfs_data_intf {
-	XEN_9PFS_RING_IDX in_cons, in_prod;
-	XEN_9PFS_RING_IDX out_cons, out_prod;
+	XEN_9PFS_RING_IDX in_cons, in_prod, in_event;
+	XEN_9PFS_RING_IDX out_cons, out_prod, out_event;
 
 	uint32_t ring_order;
 	grant_ref_t ref[];
