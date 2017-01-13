@@ -1,1 +1,1 @@
-obj-y += frontend.o backend.o
+obj-y += pvcalls.o frontend.o backend.o
