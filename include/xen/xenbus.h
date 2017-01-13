@@ -46,7 +46,7 @@
 #include <xen/interface/io/xenbus.h>
 #include <xen/interface/io/xs_wire.h>
 
-#define XENBUS_MAX_RING_GRANT_ORDER 4
+#define XENBUS_MAX_RING_GRANT_ORDER 6
 #define XENBUS_MAX_RING_GRANTS      (1U << XENBUS_MAX_RING_GRANT_ORDER)
 #define INVALID_GRANT_HANDLE       (~0U)
 
