@@ -1609,14 +1609,52 @@ p9_client_read_complete(struct work_struct *work)
 		count -= n;
 	}
 
-	err = total;
 	req->kiocb->ki_pos += total;
+	req->completed += total;
+	req->file_offset += total;
+	req->page_offset += total;
+	err = req->completed;
+
+	if (req->tot_size - req->completed > 0 && total == req->rsize) {
+		struct p9_req_t *req2;
+		u64 rsize = req->tot_size - req->completed;
+		
+		if (rsize > req->fid->iounit)
+			rsize = req->fid->iounit;
+		if (rsize > clnt->msize-P9_IOHDRSZ)
+			rsize = clnt->msize - P9_IOHDRSZ;
+
+		req2 = p9_client_get_req(clnt, P9_TREAD, "dqd", req->fid->fid,
+				req->file_offset, rsize);
+		if (IS_ERR(req2)) {
+			err = PTR_ERR(req2);
+			goto out;
+		}
+		req2->fid = req->fid;
+		req2->rsize = rsize;
+		req2->tot_size = req->tot_size;
+		req2->completed = req->completed;
+		req2->file_offset = req->file_offset;
+		req2->page_offset = req->page_offset;
+		req2->kiocb = req->kiocb;
+		req2->pagevec = req->pagevec;
+		INIT_WORK(&req2->work, p9_client_read_complete);
+
+		err = clnt->trans_mod->request(clnt, req2);
+		if (err < 0) {
+			clnt->status = Disconnected;
+			p9_free_req(clnt, req2);
+			goto out;
+		}
+		goto out2;
+	}
 
 out:
 	req->kiocb->ki_complete(req->kiocb, err, 0);
 
 	release_pages(req->pagevec, (req->tot_size + PAGE_SIZE - 1) / PAGE_SIZE, false);
 	kvfree(req->pagevec);
+out2:
 	p9_free_req(clnt, req);
 }
 
