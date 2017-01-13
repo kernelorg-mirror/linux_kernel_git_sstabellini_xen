@@ -83,12 +83,16 @@
 #define CLE_TYPE_POS		0
 #define CLE_TYPE_LEN		2
 
+#define CLE_DROP_POS		28
+#define CLE_DROP_LEN		1
 #define CLE_DSTQIDL_POS		25
 #define CLE_DSTQIDL_LEN		7
 #define CLE_DSTQIDH_POS		0
 #define CLE_DSTQIDH_LEN		5
 #define CLE_FPSEL_POS		21
 #define CLE_FPSEL_LEN		4
+#define CLE_NFPSEL_POS		17
+#define CLE_NFPSEL_LEN		4
 #define CLE_PRIORITY_POS	5
 #define CLE_PRIORITY_LEN	3
 
@@ -102,6 +106,7 @@ enum xgene_cle_ptree_nodes {
 	PKT_PROT_NODE,
 	RSS_IPV4_TCP_NODE,
 	RSS_IPV4_UDP_NODE,
+	RSS_IPV4_OTHERS_NODE,
 	LAST_NODE,
 	MAX_NODES
 };
@@ -194,9 +199,13 @@ enum xgene_cle_ptree_dbptrs {
 #define IDT_DSTQID_POS		0
 #define IDT_DSTQID_LEN		12
 #define IDT_FPSEL_POS		12
-#define IDT_FPSEL_LEN		4
-#define IDT_NFPSEL_POS		16
-#define IDT_NFPSEL_LEN		4
+#define IDT_FPSEL_LEN		5
+#define IDT_NFPSEL_POS		17
+#define IDT_NFPSEL_LEN		5
+#define IDT_FPSEL1_POS		12
+#define IDT_FPSEL1_LEN		4
+#define IDT_NFPSEL1_POS		16
+#define IDT_NFPSEL1_LEN		4
 
 struct xgene_cle_ptree_branch {
 	bool valid;
@@ -269,10 +278,8 @@ struct xgene_cle_dbptr {
 };
 
 struct xgene_cle_ptree {
-	struct xgene_cle_ptree_ewdn *dn;
 	struct xgene_cle_ptree_kn *kn;
 	struct xgene_cle_dbptr *dbptr;
-	u32 num_dn;
 	u32 num_kn;
 	u32 num_dbptr;
 	u32 start_node;
@@ -290,6 +297,6 @@ struct xgene_enet_cle {
 	u32 jump_bytes;
 };
 
-extern struct xgene_cle_ops xgene_cle3in_ops;
+extern const struct xgene_cle_ops xgene_cle3in_ops;
 
 #endif /* __XGENE_ENET_CLE_H__ */

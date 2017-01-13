@@ -269,7 +269,7 @@ static void _ceph_msgr_exit(void)
 	}
 
 	BUG_ON(zero_page == NULL);
-	page_cache_release(zero_page);
+	put_page(zero_page);
 	zero_page = NULL;
 
 	ceph_msgr_slab_exit();
@@ -282,7 +282,7 @@ int ceph_msgr_init(void)
 
 	BUG_ON(zero_page != NULL);
 	zero_page = ZERO_PAGE(0);
-	page_cache_get(zero_page);
+	get_page(zero_page);
 
 	/*
 	 * The number of active work items is limited by the number of
@@ -1393,15 +1393,9 @@ static struct ceph_auth_handshake *get_connect_authorizer(struct ceph_connection
 		return NULL;
 	}
 
-	/* Can't hold the mutex while getting authorizer */
-	mutex_unlock(&con->mutex);
 	auth = con->ops->get_authorizer(con, auth_proto, con->auth_retry);
-	mutex_lock(&con->mutex);
-
 	if (IS_ERR(auth))
 		return auth;
-	if (con->state != CON_STATE_NEGOTIATING)
-		return ERR_PTR(-EAGAIN);
 
 	con->auth_reply_buf = auth->authorizer_reply_buf;
 	con->auth_reply_buf_len = auth->authorizer_reply_buf_len;
@@ -1602,7 +1596,7 @@ static int write_partial_skip(struct ceph_connection *con)
 
 	dout("%s %p %d left\n", __func__, con, con->out_skip);
 	while (con->out_skip > 0) {
-		size_t size = min(con->out_skip, (int) PAGE_CACHE_SIZE);
+		size_t size = min(con->out_skip, (int) PAGE_SIZE);
 
 		ret = ceph_tcp_sendpage(con->sock, zero_page, 0, size, true);
 		if (ret <= 0)
@@ -2026,6 +2020,19 @@ static int process_connect(struct ceph_connection *con)
 	int ret;
 
 	dout("process_connect on %p tag %d\n", con, (int)con->in_tag);
+
+	if (con->auth_reply_buf) {
+		/*
+		 * Any connection that defines ->get_authorizer()
+		 * should also define ->verify_authorizer_reply().
+		 * See get_connect_authorizer().
+		 */
+		ret = con->ops->verify_authorizer_reply(con);
+		if (ret < 0) {
+			con->error_msg = "bad authorize reply";
+			return ret;
+		}
+	}
 
 	switch (con->in_reply.tag) {
 	case CEPH_MSGR_TAG_FEATURES:

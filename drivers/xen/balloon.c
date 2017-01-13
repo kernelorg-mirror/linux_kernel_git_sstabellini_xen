@@ -180,7 +180,6 @@ static void __balloon_append(struct page *page)
 static void balloon_append(struct page *page)
 {
 	__balloon_append(page);
-	adjust_managed_page_count(page, -1);
 }
 
 /* balloon_retrieve: rescue a page from the balloon, if it is not empty. */
@@ -200,8 +199,6 @@ static struct page *balloon_retrieve(bool require_lowmem)
 		balloon_stats.balloon_high--;
 	else
 		balloon_stats.balloon_low--;
-
-	adjust_managed_page_count(page, 1);
 
 	return page;
 }
@@ -246,6 +243,19 @@ static enum bp_state update_schedule(enum bp_state state)
 }
 
 #ifdef CONFIG_XEN_BALLOON_MEMORY_HOTPLUG
+static void release_memory_resource(struct resource *resource)
+{
+	if (!resource)
+		return;
+
+	/*
+	 * No need to reset region to identity mapped since we now
+	 * know that no I/O can be in this region
+	 */
+	release_resource(resource);
+	kfree(resource);
+}
+
 static struct resource *additional_memory_resource(phys_addr_t size)
 {
 	struct resource *res;
@@ -267,20 +277,21 @@ static struct resource *additional_memory_resource(phys_addr_t size)
 		return NULL;
 	}
 
+#ifdef CONFIG_SPARSEMEM
+	{
+		unsigned long limit = 1UL << (MAX_PHYSMEM_BITS - PAGE_SHIFT);
+		unsigned long pfn = res->start >> PAGE_SHIFT;
+
+		if (pfn > limit) {
+			pr_err("New System RAM resource outside addressable RAM (%lu > %lu)\n",
+			       pfn, limit);
+			release_memory_resource(res);
+			return NULL;
+		}
+	}
+#endif
+
 	return res;
-}
-
-static void release_memory_resource(struct resource *resource)
-{
-	if (!resource)
-		return;
-
-	/*
-	 * No need to reset region to identity mapped since we now
-	 * know that no I/O can be in this region
-	 */
-	release_resource(resource);
-	kfree(resource);
 }
 
 static enum bp_state reserve_additional_memory(void)
@@ -464,7 +475,7 @@ static enum bp_state increase_reservation(unsigned long nr_pages)
 #endif
 
 		/* Relinquish the page back to the allocator. */
-		__free_reserved_page(page);
+		free_reserved_page(page);
 	}
 
 	balloon_stats.current_pages += rc;
@@ -495,6 +506,7 @@ static enum bp_state decrease_reservation(unsigned long nr_pages, gfp_t gfp)
 			state = BP_EAGAIN;
 			break;
 		}
+		adjust_managed_page_count(page, -1);
 		scrub_page(page);
 		list_add(&page->lru, &pages);
 	}

@@ -38,7 +38,7 @@
 #include <asm/ptrace.h>
 #include <asm/processor.h>
 #include <asm/pdc.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 #ifdef CONFIG_64BIT
 #define FRAME_SIZE	128
@@ -299,6 +299,7 @@ int main(void)
 #endif
 	BLANK();
 	DEFINE(EXCDATA_IP, offsetof(struct exception_data, fault_ip));
+	DEFINE(EXCDATA_GP, offsetof(struct exception_data, fault_gp));
 	DEFINE(EXCDATA_SPACE, offsetof(struct exception_data, fault_space));
 	DEFINE(EXCDATA_ADDR, offsetof(struct exception_data, fault_addr));
 	BLANK();

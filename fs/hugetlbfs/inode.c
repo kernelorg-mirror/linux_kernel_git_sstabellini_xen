@@ -37,7 +37,7 @@
 #include <linux/migrate.h>
 #include <linux/uio.h>
 
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 
 static const struct super_operations hugetlbfs_ops;
 static const struct address_space_operations hugetlbfs_aops;
@@ -213,12 +213,12 @@ hugetlbfs_read_actor(struct page *page, unsigned long offset,
 	int i, chunksize;
 
 	/* Find which 4k chunk and offset with in that chunk */
-	i = offset >> PAGE_CACHE_SHIFT;
-	offset = offset & ~PAGE_CACHE_MASK;
+	i = offset >> PAGE_SHIFT;
+	offset = offset & ~PAGE_MASK;
 
 	while (size) {
 		size_t n;
-		chunksize = PAGE_CACHE_SIZE;
+		chunksize = PAGE_SIZE;
 		if (offset)
 			chunksize -= offset;
 		if (chunksize > size)
@@ -237,7 +237,7 @@ hugetlbfs_read_actor(struct page *page, unsigned long offset,
 /*
  * Support for read() - Find the page attached to f_mapping and copy out the
  * data. Its *very* similar to do_generic_mapping_read(), we can't use that
- * since it has PAGE_CACHE_SIZE assumptions.
+ * since it has PAGE_SIZE assumptions.
  */
 static ssize_t hugetlbfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 {
@@ -285,7 +285,7 @@ static ssize_t hugetlbfs_read_iter(struct kiocb *iocb, struct iov_iter *to)
 			 * We have the page, copy it to user space buffer.
 			 */
 			copied = hugetlbfs_read_actor(page, offset, to, nr);
-			page_cache_release(page);
+			put_page(page);
 		}
 		offset += copied;
 		retval += copied;
@@ -416,7 +416,6 @@ static void remove_inode_hugepages(struct inode *inode, loff_t lstart,
 
 		for (i = 0; i < pagevec_count(&pvec); ++i) {
 			struct page *page = pvec.pages[i];
-			bool rsv_on_error;
 			u32 hash;
 
 			/*
@@ -458,18 +457,17 @@ static void remove_inode_hugepages(struct inode *inode, loff_t lstart,
 			 * cache (remove_huge_page) BEFORE removing the
 			 * region/reserve map (hugetlb_unreserve_pages).  In
 			 * rare out of memory conditions, removal of the
-			 * region/reserve map could fail.  Before free'ing
-			 * the page, note PagePrivate which is used in case
-			 * of error.
+			 * region/reserve map could fail. Correspondingly,
+			 * the subpool and global reserve usage count can need
+			 * to be adjusted.
 			 */
-			rsv_on_error = !PagePrivate(page);
+			VM_BUG_ON(PagePrivate(page));
 			remove_huge_page(page);
 			freed++;
 			if (!truncate_op) {
 				if (unlikely(hugetlb_unreserve_pages(inode,
 							next, next + 1, 1)))
-					hugetlb_fix_reserve_counts(inode,
-								rsv_on_error);
+					hugetlb_fix_reserve_counts(inode);
 			}
 
 			unlock_page(page);
@@ -657,7 +655,7 @@ static long hugetlbfs_fallocate(struct file *file, int mode, loff_t offset,
 
 	if (!(mode & FALLOC_FL_KEEP_SIZE) && offset + len > inode->i_size)
 		i_size_write(inode, offset + len);
-	inode->i_ctime = CURRENT_TIME;
+	inode->i_ctime = current_time(inode);
 out:
 	inode_unlock(inode);
 	return error;
@@ -672,7 +670,7 @@ static int hugetlbfs_setattr(struct dentry *dentry, struct iattr *attr)
 
 	BUG_ON(!inode);
 
-	error = inode_change_ok(inode, attr);
+	error = setattr_prepare(dentry, attr);
 	if (error)
 		return error;
 
@@ -702,7 +700,7 @@ static struct inode *hugetlbfs_get_root(struct super_block *sb,
 		inode->i_mode = S_IFDIR | config->mode;
 		inode->i_uid = config->uid;
 		inode->i_gid = config->gid;
-		inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
+		inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
 		info = HUGETLBFS_I(inode);
 		mpol_shared_policy_init(&info->policy, NULL);
 		inode->i_op = &hugetlbfs_dir_inode_operations;
@@ -741,7 +739,7 @@ static struct inode *hugetlbfs_get_inode(struct super_block *sb,
 		lockdep_set_class(&inode->i_mapping->i_mmap_rwsem,
 				&hugetlbfs_i_mmap_rwsem_key);
 		inode->i_mapping->a_ops = &hugetlbfs_aops;
-		inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
+		inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
 		inode->i_mapping->private_data = resv_map;
 		info = HUGETLBFS_I(inode);
 		/*
@@ -790,7 +788,7 @@ static int hugetlbfs_mknod(struct inode *dir,
 
 	inode = hugetlbfs_get_inode(dir->i_sb, dir, mode, dev);
 	if (inode) {
-		dir->i_ctime = dir->i_mtime = CURRENT_TIME;
+		dir->i_ctime = dir->i_mtime = current_time(dir);
 		d_instantiate(dentry, inode);
 		dget(dentry);	/* Extra count - pin the dentry in core */
 		error = 0;
@@ -827,7 +825,7 @@ static int hugetlbfs_symlink(struct inode *dir,
 		} else
 			iput(inode);
 	}
-	dir->i_ctime = dir->i_mtime = CURRENT_TIME;
+	dir->i_ctime = dir->i_mtime = current_time(dir);
 
 	return error;
 }

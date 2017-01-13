@@ -8,6 +8,7 @@
  *  Linux VFS inode operations.
  */
 
+#include <linux/bvec.h>
 #include "protocol.h"
 #include "orangefs-kernel.h"
 #include "orangefs-bufmap.h"
@@ -18,8 +19,8 @@ static int read_one_page(struct page *page)
 	int max_block;
 	ssize_t bytes_read = 0;
 	struct inode *inode = page->mapping->host;
-	const __u32 blocksize = PAGE_CACHE_SIZE;	/* inode->i_blksize */
-	const __u32 blockbits = PAGE_CACHE_SHIFT;	/* inode->i_blkbits */
+	const __u32 blocksize = PAGE_SIZE;	/* inode->i_blksize */
+	const __u32 blockbits = PAGE_SHIFT;	/* inode->i_blkbits */
 	struct iov_iter to;
 	struct bio_vec bv = {.bv_page = page, .bv_len = PAGE_SIZE};
 
@@ -80,13 +81,13 @@ static int orangefs_readpages(struct file *file,
 		if (!add_to_page_cache(page,
 				       mapping,
 				       page->index,
-				       GFP_KERNEL)) {
+				       readahead_gfp_mask(mapping))) {
 			ret = read_one_page(page);
 			gossip_debug(GOSSIP_INODE_DEBUG,
 				"failure adding page to cache, read_one_page returned: %d\n",
 				ret);
 	      } else {
-			page_cache_release(page);
+			put_page(page);
 	      }
 	}
 	BUG_ON(!list_empty(pages));
@@ -124,19 +125,16 @@ static int orangefs_releasepage(struct page *page, gfp_t foo)
  * will need to be able to use O_DIRECT on open in order to support
  * AIO. Modeled after NFS, they do this too.
  */
-/*
- * static ssize_t orangefs_direct_IO(int rw,
- *			struct kiocb *iocb,
- *			struct iov_iter *iter,
- *			loff_t offset)
- *{
- *	gossip_debug(GOSSIP_INODE_DEBUG,
- *		     "orangefs_direct_IO: %s\n",
- *		     iocb->ki_filp->f_path.dentry->d_name.name);
- *
- *	return -EINVAL;
- *}
- */
+
+static ssize_t orangefs_direct_IO(struct kiocb *iocb,
+				  struct iov_iter *iter)
+{
+	gossip_debug(GOSSIP_INODE_DEBUG,
+		     "orangefs_direct_IO: %pD\n",
+		     iocb->ki_filp);
+
+	return -EINVAL;
+}
 
 struct backing_dev_info orangefs_backing_dev_info = {
 	.name = "orangefs",
@@ -150,7 +148,7 @@ const struct address_space_operations orangefs_address_operations = {
 	.readpages = orangefs_readpages,
 	.invalidatepage = orangefs_invalidatepage,
 	.releasepage = orangefs_releasepage,
-/*	.direct_IO = orangefs_direct_IO */
+	.direct_IO = orangefs_direct_IO,
 };
 
 static int orangefs_setattr_size(struct inode *inode, struct iattr *iattr)
@@ -204,22 +202,8 @@ static int orangefs_setattr_size(struct inode *inode, struct iattr *iattr)
 	if (ret != 0)
 		return ret;
 
-	/*
-	 * Only change the c/mtime if we are changing the size or we are
-	 * explicitly asked to change it.  This handles the semantic difference
-	 * between truncate() and ftruncate() as implemented in the VFS.
-	 *
-	 * The regular truncate() case without ATTR_CTIME and ATTR_MTIME is a
-	 * special case where we need to update the times despite not having
-	 * these flags set.  For all other operations the VFS set these flags
-	 * explicitly if it wants a timestamp update.
-	 */
-	if (orig_size != i_size_read(inode) &&
-	    !(iattr->ia_valid & (ATTR_CTIME | ATTR_MTIME))) {
-		iattr->ia_ctime = iattr->ia_mtime =
-			current_fs_time(inode->i_sb);
+	if (orig_size != i_size_read(inode))
 		iattr->ia_valid |= ATTR_CTIME | ATTR_MTIME;
-	}
 
 	return ret;
 }
@@ -233,10 +217,10 @@ int orangefs_setattr(struct dentry *dentry, struct iattr *iattr)
 	struct inode *inode = dentry->d_inode;
 
 	gossip_debug(GOSSIP_INODE_DEBUG,
-		     "orangefs_setattr: called on %s\n",
-		     dentry->d_name.name);
+		     "orangefs_setattr: called on %pd\n",
+		     dentry);
 
-	ret = inode_change_ok(inode, iattr);
+	ret = setattr_prepare(dentry, iattr);
 	if (ret)
 		goto out;
 
@@ -276,10 +260,10 @@ int orangefs_getattr(struct vfsmount *mnt,
 	struct orangefs_inode_s *orangefs_inode = NULL;
 
 	gossip_debug(GOSSIP_INODE_DEBUG,
-		     "orangefs_getattr: called on %s\n",
-		     dentry->d_name.name);
+		     "orangefs_getattr: called on %pd\n",
+		     dentry);
 
-	ret = orangefs_inode_getattr(inode, 0, 1);
+	ret = orangefs_inode_getattr(inode, 0, 0);
 	if (ret == 0) {
 		generic_fillattr(inode, kstat);
 
@@ -308,15 +292,12 @@ int orangefs_permission(struct inode *inode, int mask)
 }
 
 /* ORANGEDS2 implementation of VFS inode operations for files */
-struct inode_operations orangefs_file_inode_operations = {
+const struct inode_operations orangefs_file_inode_operations = {
 	.get_acl = orangefs_get_acl,
 	.set_acl = orangefs_set_acl,
 	.setattr = orangefs_setattr,
 	.getattr = orangefs_getattr,
-	.setxattr = generic_setxattr,
-	.getxattr = generic_getxattr,
 	.listxattr = orangefs_listxattr,
-	.removexattr = generic_removexattr,
 	.permission = orangefs_permission,
 };
 
@@ -328,7 +309,7 @@ static int orangefs_init_iops(struct inode *inode)
 	case S_IFREG:
 		inode->i_op = &orangefs_file_inode_operations;
 		inode->i_fop = &orangefs_file_operations;
-		inode->i_blkbits = PAGE_CACHE_SHIFT;
+		inode->i_blkbits = PAGE_SHIFT;
 		break;
 	case S_IFLNK:
 		inode->i_op = &orangefs_symlink_inode_operations;
@@ -401,7 +382,7 @@ struct inode *orangefs_iget(struct super_block *sb, struct orangefs_object_kref 
 	if (!inode || !(inode->i_state & I_NEW))
 		return inode;
 
-	error = orangefs_inode_getattr(inode, 1, 0);
+	error = orangefs_inode_getattr(inode, 1, 1);
 	if (error) {
 		iget_failed(inode);
 		return ERR_PTR(error);
@@ -446,7 +427,7 @@ struct inode *orangefs_new_inode(struct super_block *sb, struct inode *dir,
 	orangefs_set_inode(inode, ref);
 	inode->i_ino = hash;	/* needed for stat etc */
 
-	error = orangefs_inode_getattr(inode, 1, 0);
+	error = orangefs_inode_getattr(inode, 1, 1);
 	if (error)
 		goto out_iput;
 
@@ -455,8 +436,8 @@ struct inode *orangefs_new_inode(struct super_block *sb, struct inode *dir,
 	inode->i_mode = mode;
 	inode->i_uid = current_fsuid();
 	inode->i_gid = current_fsgid();
-	inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
-	inode->i_size = PAGE_CACHE_SIZE;
+	inode->i_atime = inode->i_mtime = inode->i_ctime = current_time(inode);
+	inode->i_size = PAGE_SIZE;
 	inode->i_rdev = dev;
 
 	error = insert_inode_locked4(inode, hash, orangefs_test_inode, ref);

@@ -361,15 +361,20 @@ struct hd_struct *add_partition(struct gendisk *disk, int partno,
 			goto out_del;
 	}
 
+	err = hd_ref_init(p);
+	if (err) {
+		if (flags & ADDPART_FLAG_WHOLEDISK)
+			goto out_remove_file;
+		goto out_del;
+	}
+
 	/* everything is up and running, commence */
 	rcu_assign_pointer(ptbl->part[partno], p);
 
 	/* suppress uevent if the disk suppresses it */
 	if (!dev_get_uevent_suppress(ddev))
 		kobject_uevent(&pdev->kobj, KOBJ_ADD);
-
-	if (!hd_ref_init(p))
-		return p;
+	return p;
 
 out_free_info:
 	free_part_info(p);
@@ -378,6 +383,8 @@ out_free_stats:
 out_free:
 	kfree(p);
 	return ERR_PTR(err);
+out_remove_file:
+	device_remove_file(pdev, &dev_attr_whole_disk);
 out_del:
 	kobject_put(p->holder_dir);
 	device_del(pdev);
@@ -421,6 +428,56 @@ static int drop_partitions(struct gendisk *disk, struct block_device *bdev)
 	disk_part_iter_exit(&piter);
 
 	return 0;
+}
+
+static bool part_zone_aligned(struct gendisk *disk,
+			      struct block_device *bdev,
+			      sector_t from, sector_t size)
+{
+	unsigned int zone_size = bdev_zone_size(bdev);
+
+	/*
+	 * If this function is called, then the disk is a zoned block device
+	 * (host-aware or host-managed). This can be detected even if the
+	 * zoned block device support is disabled (CONFIG_BLK_DEV_ZONED not
+	 * set). In this case, however, only host-aware devices will be seen
+	 * as a block device is not created for host-managed devices. Without
+	 * zoned block device support, host-aware drives can still be used as
+	 * regular block devices (no zone operation) and their zone size will
+	 * be reported as 0. Allow this case.
+	 */
+	if (!zone_size)
+		return true;
+
+	/*
+	 * Check partition start and size alignement. If the drive has a
+	 * smaller last runt zone, ignore it and allow the partition to
+	 * use it. Check the zone size too: it should be a power of 2 number
+	 * of sectors.
+	 */
+	if (WARN_ON_ONCE(!is_power_of_2(zone_size))) {
+		u32 rem;
+
+		div_u64_rem(from, zone_size, &rem);
+		if (rem)
+			return false;
+		if ((from + size) < get_capacity(disk)) {
+			div_u64_rem(size, zone_size, &rem);
+			if (rem)
+				return false;
+		}
+
+	} else {
+
+		if (from & (zone_size - 1))
+			return false;
+		if ((from + size) < get_capacity(disk) &&
+		    (size & (zone_size - 1)))
+			return false;
+
+	}
+
+	return true;
 }
 
 int rescan_partitions(struct gendisk *disk, struct block_device *bdev)
@@ -488,7 +545,6 @@ rescan:
 	/* add partitions */
 	for (p = 1; p < state->limit; p++) {
 		sector_t size, from;
-		struct partition_meta_info *info = NULL;
 
 		size = state->parts[p].size;
 		if (!size)
@@ -523,8 +579,21 @@ rescan:
 			}
 		}
 
-		if (state->parts[p].has_info)
-			info = &state->parts[p].info;
+		/*
+		 * On a zoned block device, partitions should be aligned on the
+		 * device zone size (i.e. zone boundary crossing not allowed).
+		 * Otherwise, resetting the write pointer of the last zone of
+		 * one partition may impact the following partition.
+		 */
+		if (bdev_is_zoned(bdev) &&
+		    !part_zone_aligned(disk, bdev, from, size)) {
+			printk(KERN_WARNING
+			       "%s: p%d start %llu+%llu is not zone aligned\n",
+			       disk->disk_name, p, (unsigned long long) from,
+			       (unsigned long long) size);
+			continue;
+		}
+
 		part = add_partition(disk, p, from, size,
 				     state->parts[p].flags,
 				     &state->parts[p].info);
@@ -566,8 +635,8 @@ static struct page *read_pagecache_sector(struct block_device *bdev, sector_t n)
 {
 	struct address_space *mapping = bdev->bd_inode->i_mapping;
 
-	return read_mapping_page(mapping, (pgoff_t)(n >> (PAGE_CACHE_SHIFT-9)),
-			NULL);
+	return read_mapping_page(mapping, (pgoff_t)(n >> (PAGE_SHIFT-9)),
+				 NULL);
 }
 
 unsigned char *read_dev_sector(struct block_device *bdev, sector_t n, Sector *p)
@@ -584,9 +653,9 @@ unsigned char *read_dev_sector(struct block_device *bdev, sector_t n, Sector *p)
 		if (PageError(page))
 			goto fail;
 		p->v = page;
-		return (unsigned char *)page_address(page) +  ((n & ((1 << (PAGE_CACHE_SHIFT - 9)) - 1)) << 9);
+		return (unsigned char *)page_address(page) +  ((n & ((1 << (PAGE_SHIFT - 9)) - 1)) << 9);
 fail:
-		page_cache_release(page);
+		put_page(page);
 	}
 	p->v = NULL;
 	return NULL;

@@ -1,4 +1,3 @@
-#define __DISABLE_GUP_DEPRECATED 1
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/err.h>
@@ -61,6 +60,16 @@ static int follow_pfn_pte(struct vm_area_struct *vma, unsigned long address,
 	return -EEXIST;
 }
 
+/*
+ * FOLL_FORCE can write to even unwritable pte's, but only
+ * after we've gone through a COW cycle and they are dirty.
+ */
+static inline bool can_follow_write_pte(pte_t pte, unsigned int flags)
+{
+	return pte_write(pte) ||
+		((flags & FOLL_FORCE) && (flags & FOLL_COW) && pte_dirty(pte));
+}
+
 static struct page *follow_page_pte(struct vm_area_struct *vma,
 		unsigned long address, pmd_t *pmd, unsigned int flags)
 {
@@ -96,7 +105,7 @@ retry:
 	}
 	if ((flags & FOLL_NUMA) && pte_protnone(pte))
 		goto no_page;
-	if ((flags & FOLL_WRITE) && !pte_write(pte)) {
+	if ((flags & FOLL_WRITE) && !can_follow_write_pte(pte, flags)) {
 		pte_unmap_unlock(ptep, ptl);
 		return NULL;
 	}
@@ -280,6 +289,8 @@ struct page *follow_page_mask(struct vm_area_struct *vma,
 			spin_unlock(ptl);
 			ret = 0;
 			split_huge_pmd(vma, pmd, address);
+			if (pmd_trans_unstable(pmd))
+				ret = -EBUSY;
 		} else {
 			get_page(page);
 			spin_unlock(ptl);
@@ -287,6 +298,8 @@ struct page *follow_page_mask(struct vm_area_struct *vma,
 			ret = split_huge_page(page);
 			unlock_page(page);
 			put_page(page);
+			if (pmd_none(*pmd))
+				return no_page_table(vma, flags);
 		}
 
 		return ret ? ERR_PTR(ret) :
@@ -351,7 +364,6 @@ unmap:
 static int faultin_page(struct task_struct *tsk, struct vm_area_struct *vma,
 		unsigned long address, unsigned int *flags, int *nonblocking)
 {
-	struct mm_struct *mm = vma->vm_mm;
 	unsigned int fault_flags = 0;
 	int ret;
 
@@ -376,7 +388,7 @@ static int faultin_page(struct task_struct *tsk, struct vm_area_struct *vma,
 		fault_flags |= FAULT_FLAG_TRIED;
 	}
 
-	ret = handle_mm_fault(mm, vma, address, fault_flags);
+	ret = handle_mm_fault(vma, address, fault_flags);
 	if (ret & VM_FAULT_ERROR) {
 		if (ret & VM_FAULT_OOM)
 			return -ENOMEM;
@@ -410,7 +422,7 @@ static int faultin_page(struct task_struct *tsk, struct vm_area_struct *vma,
 	 * reCOWed by userspace write).
 	 */
 	if ((ret & VM_FAULT_WRITE) && !(vma->vm_flags & VM_WRITE))
-		*flags &= ~FOLL_WRITE;
+	        *flags |= FOLL_COW;
 	return 0;
 }
 
@@ -514,7 +526,7 @@ static int check_vma_flags(struct vm_area_struct *vma, unsigned long gup_flags)
  * instead of __get_user_pages. __get_user_pages should be used only if
  * you need some special @gup_flags.
  */
-long __get_user_pages(struct task_struct *tsk, struct mm_struct *mm,
+static long __get_user_pages(struct task_struct *tsk, struct mm_struct *mm,
 		unsigned long start, unsigned long nr_pages,
 		unsigned int gup_flags, struct page **pages,
 		struct vm_area_struct **vmas, int *nonblocking)
@@ -619,9 +631,9 @@ next_page:
 	} while (nr_pages);
 	return i;
 }
-EXPORT_SYMBOL(__get_user_pages);
 
-bool vma_permits_fault(struct vm_area_struct *vma, unsigned int fault_flags)
+static bool vma_permits_fault(struct vm_area_struct *vma,
+			      unsigned int fault_flags)
 {
 	bool write   = !!(fault_flags & FAULT_FLAG_WRITE);
 	bool foreign = !!(fault_flags & FAULT_FLAG_REMOTE);
@@ -691,7 +703,7 @@ retry:
 	if (!vma_permits_fault(vma, fault_flags))
 		return -EFAULT;
 
-	ret = handle_mm_fault(mm, vma, address, fault_flags);
+	ret = handle_mm_fault(vma, address, fault_flags);
 	major |= ret & VM_FAULT_MAJOR;
 	if (ret & VM_FAULT_ERROR) {
 		if (ret & VM_FAULT_OOM)
@@ -721,12 +733,12 @@ retry:
 	}
 	return 0;
 }
+EXPORT_SYMBOL_GPL(fixup_user_fault);
 
 static __always_inline long __get_user_pages_locked(struct task_struct *tsk,
 						struct mm_struct *mm,
 						unsigned long start,
 						unsigned long nr_pages,
-						int write, int force,
 						struct page **pages,
 						struct vm_area_struct **vmas,
 						int *locked, bool notify_drop,
@@ -744,10 +756,6 @@ static __always_inline long __get_user_pages_locked(struct task_struct *tsk,
 
 	if (pages)
 		flags |= FOLL_GET;
-	if (write)
-		flags |= FOLL_WRITE;
-	if (force)
-		flags |= FOLL_FORCE;
 
 	pages_done = 0;
 	lock_dropped = false;
@@ -839,41 +847,39 @@ static __always_inline long __get_user_pages_locked(struct task_struct *tsk,
  *      if (locked)
  *          up_read(&mm->mmap_sem);
  */
-long get_user_pages_locked6(unsigned long start, unsigned long nr_pages,
-			   int write, int force, struct page **pages,
+long get_user_pages_locked(unsigned long start, unsigned long nr_pages,
+			   unsigned int gup_flags, struct page **pages,
 			   int *locked)
 {
 	return __get_user_pages_locked(current, current->mm, start, nr_pages,
-				       write, force, pages, NULL, locked, true,
-				       FOLL_TOUCH);
+				       pages, NULL, locked, true,
+				       gup_flags | FOLL_TOUCH);
 }
-EXPORT_SYMBOL(get_user_pages_locked6);
+EXPORT_SYMBOL(get_user_pages_locked);
 
 /*
- * Same as get_user_pages_unlocked(...., FOLL_TOUCH) but it allows to
- * pass additional gup_flags as last parameter (like FOLL_HWPOISON).
+ * Same as get_user_pages_unlocked(...., FOLL_TOUCH) but it allows for
+ * tsk, mm to be specified.
  *
  * NOTE: here FOLL_TOUCH is not set implicitly and must be set by the
- * caller if required (just like with __get_user_pages). "FOLL_GET",
- * "FOLL_WRITE" and "FOLL_FORCE" are set implicitly as needed
- * according to the parameters "pages", "write", "force"
- * respectively.
+ * caller if required (just like with __get_user_pages). "FOLL_GET"
+ * is set implicitly if "pages" is non-NULL.
  */
-__always_inline long __get_user_pages_unlocked(struct task_struct *tsk, struct mm_struct *mm,
-					       unsigned long start, unsigned long nr_pages,
-					       int write, int force, struct page **pages,
-					       unsigned int gup_flags)
+static __always_inline long __get_user_pages_unlocked(struct task_struct *tsk,
+		struct mm_struct *mm, unsigned long start,
+		unsigned long nr_pages, struct page **pages,
+		unsigned int gup_flags)
 {
 	long ret;
 	int locked = 1;
+
 	down_read(&mm->mmap_sem);
-	ret = __get_user_pages_locked(tsk, mm, start, nr_pages, write, force,
-				      pages, NULL, &locked, false, gup_flags);
+	ret = __get_user_pages_locked(tsk, mm, start, nr_pages, pages, NULL,
+				      &locked, false, gup_flags);
 	if (locked)
 		up_read(&mm->mmap_sem);
 	return ret;
 }
-EXPORT_SYMBOL(__get_user_pages_unlocked);
 
 /*
  * get_user_pages_unlocked() is suitable to replace the form:
@@ -887,18 +893,16 @@ EXPORT_SYMBOL(__get_user_pages_unlocked);
  *      get_user_pages_unlocked(tsk, mm, ..., pages);
  *
  * It is functionally equivalent to get_user_pages_fast so
- * get_user_pages_fast should be used instead, if the two parameters
- * "tsk" and "mm" are respectively equal to current and current->mm,
- * or if "force" shall be set to 1 (get_user_pages_fast misses the
- * "force" parameter).
+ * get_user_pages_fast should be used instead if specific gup_flags
+ * (e.g. FOLL_FORCE) are not required.
  */
-long get_user_pages_unlocked5(unsigned long start, unsigned long nr_pages,
-			     int write, int force, struct page **pages)
+long get_user_pages_unlocked(unsigned long start, unsigned long nr_pages,
+			     struct page **pages, unsigned int gup_flags)
 {
 	return __get_user_pages_unlocked(current, current->mm, start, nr_pages,
-					 write, force, pages, FOLL_TOUCH);
+					 pages, gup_flags | FOLL_TOUCH);
 }
-EXPORT_SYMBOL(get_user_pages_unlocked5);
+EXPORT_SYMBOL(get_user_pages_unlocked);
 
 /*
  * get_user_pages_remote() - pin user pages in memory
@@ -907,14 +911,15 @@ EXPORT_SYMBOL(get_user_pages_unlocked5);
  * @mm:		mm_struct of target mm
  * @start:	starting user address
  * @nr_pages:	number of pages from start to pin
- * @write:	whether pages will be written to by the caller
- * @force:	whether to force access even when user mapping is currently
- *		protected (but never forces write access to shared mapping).
+ * @gup_flags:	flags modifying lookup behaviour
  * @pages:	array that receives pointers to the pages pinned.
  *		Should be at least nr_pages long. Or NULL, if caller
  *		only intends to ensure the pages are faulted in.
  * @vmas:	array of pointers to vmas corresponding to each page.
  *		Or NULL if the caller does not require them.
+ * @locked:	pointer to lock flag indicating whether lock is held and
+ *		subsequently whether VM_FAULT_RETRY functionality can be
+ *		utilised. Lock must initially be held.
  *
  * Returns number of pages pinned. This may be fewer than the number
  * requested. If nr_pages is 0 or negative, returns 0. If no pages
@@ -938,9 +943,9 @@ EXPORT_SYMBOL(get_user_pages_unlocked5);
  * or similar operation cannot guarantee anything stronger anyway because
  * locks can't be held over the syscall boundary.
  *
- * If write=0, the page must not be written to. If the page is written to,
- * set_page_dirty (or set_page_dirty_lock, as appropriate) must be called
- * after the page is finished with, and before put_page is called.
+ * If gup_flags & FOLL_WRITE == 0, the page must not be written to. If the page
+ * is written to, set_page_dirty (or set_page_dirty_lock, as appropriate) must
+ * be called after the page is finished with, and before put_page is called.
  *
  * get_user_pages is typically used for fewer-copy IO operations, to get a
  * handle on the memory by some means other than accesses via the user virtual
@@ -957,30 +962,31 @@ EXPORT_SYMBOL(get_user_pages_unlocked5);
  */
 long get_user_pages_remote(struct task_struct *tsk, struct mm_struct *mm,
 		unsigned long start, unsigned long nr_pages,
-		int write, int force, struct page **pages,
-		struct vm_area_struct **vmas)
+		unsigned int gup_flags, struct page **pages,
+		struct vm_area_struct **vmas, int *locked)
 {
-	return __get_user_pages_locked(tsk, mm, start, nr_pages, write, force,
-				       pages, vmas, NULL, false,
-				       FOLL_TOUCH | FOLL_REMOTE);
+	return __get_user_pages_locked(tsk, mm, start, nr_pages, pages, vmas,
+				       locked, true,
+				       gup_flags | FOLL_TOUCH | FOLL_REMOTE);
 }
 EXPORT_SYMBOL(get_user_pages_remote);
 
 /*
  * This is the same as get_user_pages_remote(), just with a
  * less-flexible calling convention where we assume that the task
- * and mm being operated on are the current task's.  We also
- * obviously don't pass FOLL_REMOTE in here.
+ * and mm being operated on are the current task's and don't allow
+ * passing of a locked parameter.  We also obviously don't pass
+ * FOLL_REMOTE in here.
  */
-long get_user_pages6(unsigned long start, unsigned long nr_pages,
-		int write, int force, struct page **pages,
+long get_user_pages(unsigned long start, unsigned long nr_pages,
+		unsigned int gup_flags, struct page **pages,
 		struct vm_area_struct **vmas)
 {
 	return __get_user_pages_locked(current, current->mm, start, nr_pages,
-				       write, force, pages, vmas, NULL, false,
-				       FOLL_TOUCH);
+				       pages, vmas, NULL, false,
+				       gup_flags | FOLL_TOUCH);
 }
-EXPORT_SYMBOL(get_user_pages6);
+EXPORT_SYMBOL(get_user_pages);
 
 /**
  * populate_vma_page_range() -  populate a range of pages in the vma.
@@ -1107,7 +1113,7 @@ int __mm_populate(unsigned long start, unsigned long len, int ignore_errors)
  * @addr: user address
  *
  * Returns struct page pointer of user page pinned for dump,
- * to be freed afterwards by page_cache_release() or put_page().
+ * to be freed afterwards by put_page().
  *
  * Returns NULL on any kind of failure - a hole must then be inserted into
  * the corefile, to preserve alignment with its headers; and also returns
@@ -1491,7 +1497,6 @@ int __get_user_pages_fast(unsigned long start, int nr_pages, int write,
 int get_user_pages_fast(unsigned long start, int nr_pages, int write,
 			struct page **pages)
 {
-	struct mm_struct *mm = current->mm;
 	int nr, ret;
 
 	start &= PAGE_MASK;
@@ -1503,8 +1508,8 @@ int get_user_pages_fast(unsigned long start, int nr_pages, int write,
 		start += nr << PAGE_SHIFT;
 		pages += nr;
 
-		ret = get_user_pages_unlocked(current, mm, start,
-					      nr_pages - nr, write, 0, pages);
+		ret = get_user_pages_unlocked(start, nr_pages - nr, pages,
+				write ? FOLL_WRITE : 0);
 
 		/* Have to be a bit careful with return values */
 		if (nr > 0) {
@@ -1519,38 +1524,3 @@ int get_user_pages_fast(unsigned long start, int nr_pages, int write,
 }
 
 #endif /* CONFIG_HAVE_GENERIC_RCU_GUP */
-
-long get_user_pages8(struct task_struct *tsk, struct mm_struct *mm,
-		     unsigned long start, unsigned long nr_pages,
-		     int write, int force, struct page **pages,
-		     struct vm_area_struct **vmas)
-{
-	WARN_ONCE(tsk != current, "get_user_pages() called on remote task");
-	WARN_ONCE(mm != current->mm, "get_user_pages() called on remote mm");
-
-	return get_user_pages6(start, nr_pages, write, force, pages, vmas);
-}
-EXPORT_SYMBOL(get_user_pages8);
-
-long get_user_pages_locked8(struct task_struct *tsk, struct mm_struct *mm,
-			    unsigned long start, unsigned long nr_pages,
-			    int write, int force, struct page **pages, int *locked)
-{
-	WARN_ONCE(tsk != current, "get_user_pages_locked() called on remote task");
-	WARN_ONCE(mm != current->mm, "get_user_pages_locked() called on remote mm");
-
-	return get_user_pages_locked6(start, nr_pages, write, force, pages, locked);
-}
-EXPORT_SYMBOL(get_user_pages_locked8);
-
-long get_user_pages_unlocked7(struct task_struct *tsk, struct mm_struct *mm,
-				  unsigned long start, unsigned long nr_pages,
-				  int write, int force, struct page **pages)
-{
-	WARN_ONCE(tsk != current, "get_user_pages_unlocked() called on remote task");
-	WARN_ONCE(mm != current->mm, "get_user_pages_unlocked() called on remote mm");
-
-	return get_user_pages_unlocked5(start, nr_pages, write, force, pages);
-}
-EXPORT_SYMBOL(get_user_pages_unlocked7);
-

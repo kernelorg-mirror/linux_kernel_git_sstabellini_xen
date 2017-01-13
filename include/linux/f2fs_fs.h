@@ -52,10 +52,17 @@
 
 #define VERSION_LEN	256
 #define MAX_VOLUME_NAME		512
+#define MAX_PATH_LEN		64
+#define MAX_DEVICES		8
 
 /*
  * For superblock
  */
+struct f2fs_device {
+	__u8 path[MAX_PATH_LEN];
+	__le32 total_segments;
+} __packed;
+
 struct f2fs_super_block {
 	__le32 magic;			/* Magic Number */
 	__le16 major_ver;		/* Major Version */
@@ -94,12 +101,14 @@ struct f2fs_super_block {
 	__le32 feature;			/* defined features */
 	__u8 encryption_level;		/* versioning level for encryption */
 	__u8 encrypt_pw_salt[16];	/* Salt used for string2key algorithm */
-	__u8 reserved[871];		/* valid reserved region */
+	struct f2fs_device devs[MAX_DEVICES];	/* device list */
+	__u8 reserved[327];		/* valid reserved region */
 } __packed;
 
 /*
  * For checkpoint
  */
+#define CP_CRC_RECOVERY_FLAG	0x00000040
 #define CP_FASTBOOT_FLAG	0x00000020
 #define CP_FSCK_FLAG		0x00000010
 #define CP_ERROR_FLAG		0x00000008
@@ -262,7 +271,7 @@ struct f2fs_node {
 /*
  * For NAT entries
  */
-#define NAT_ENTRY_PER_BLOCK (PAGE_CACHE_SIZE / sizeof(struct f2fs_nat_entry))
+#define NAT_ENTRY_PER_BLOCK (PAGE_SIZE / sizeof(struct f2fs_nat_entry))
 
 struct f2fs_nat_entry {
 	__u8 version;		/* latest version of cached nat entry */
@@ -282,7 +291,7 @@ struct f2fs_nat_block {
  * Not allow to change this.
  */
 #define SIT_VBLOCK_MAP_SIZE 64
-#define SIT_ENTRY_PER_BLOCK (PAGE_CACHE_SIZE / sizeof(struct f2fs_sit_entry))
+#define SIT_ENTRY_PER_BLOCK (PAGE_SIZE / sizeof(struct f2fs_sit_entry))
 
 /*
  * Note that f2fs_sit_entry->vblocks has the following bit-field information.
@@ -507,5 +516,7 @@ enum {
 	F2FS_FT_SYMLINK,
 	F2FS_FT_MAX
 };
+
+#define S_SHIFT 12
 
 #endif  /* _LINUX_F2FS_FS_H */

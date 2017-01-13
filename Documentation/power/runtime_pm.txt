@@ -586,6 +586,10 @@ drivers to make their ->remove() callbacks avoid races with runtime PM directly,
 but also it allows of more flexibility in the handling of devices during the
 removal of their drivers.
 
+Drivers in ->remove() callback should undo the runtime PM changes done
+in ->probe(). Usually this means calling pm_runtime_disable(),
+pm_runtime_dont_use_autosuspend() etc.
+
 The user space can effectively disallow the driver of the device to power manage
 it at run time by changing the value of its /sys/devices/.../power/control
 attribute to "on", which causes pm_runtime_forbid() to be called.  In principle,
@@ -670,7 +674,7 @@ left in runtime suspend.  If that happens, the PM core will not execute any
 system suspend and resume callbacks for all of those devices, except for the
 complete callback, which is then entirely responsible for handling the device
 as appropriate.  This only applies to system suspend transitions that are not
-related to hibernation (see Documentation/power/devices.txt for more
+related to hibernation (see Documentation/power/admin-guide/devices.rst for more
 information).
 
 The PM core does its best to reduce the probability of race conditions between

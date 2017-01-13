@@ -121,6 +121,11 @@ static void read_factory_config(struct nvmem_device *nvmem, void *context)
 	const char *partnum = NULL;
 	struct davinci_soc_info *soc_info = &davinci_soc_info;
 
+	if (!IS_BUILTIN(CONFIG_NVMEM)) {
+		pr_warn("Factory Config not available without CONFIG_NVMEM\n");
+		goto bad_config;
+	}
+
 	ret = nvmem_device_read(nvmem, 0, sizeof(factory_config),
 				&factory_config);
 	if (ret != sizeof(struct factory_config)) {
@@ -493,21 +498,13 @@ static void __init mityomapl138_config_emac(void)
 		pr_warn("emac registration failed: %d\n", ret);
 }
 
-static struct davinci_pm_config da850_pm_pdata = {
-	.sleepcount = 128,
-};
-
-static struct platform_device da850_pm_device = {
-	.name	= "pm-davinci",
-	.dev = {
-		.platform_data  = &da850_pm_pdata,
-	},
-	.id	= -1,
-};
-
 static void __init mityomapl138_init(void)
 {
 	int ret;
+
+	ret = da8xx_register_cfgchip();
+	if (ret)
+		pr_warn("%s: CFGCHIP registration failed: %d\n", __func__, ret);
 
 	/* for now, no special EDMA channels are reserved */
 	ret = da850_register_edma(NULL);
@@ -550,9 +547,7 @@ static void __init mityomapl138_init(void)
 	if (ret)
 		pr_warn("cpuidle registration failed: %d\n", ret);
 
-	ret = da850_register_pm(&da850_pm_device);
-	if (ret)
-		pr_warn("suspend registration failed: %d\n", ret);
+	davinci_pm_init();
 }
 
 #ifdef CONFIG_SERIAL_8250_CONSOLE

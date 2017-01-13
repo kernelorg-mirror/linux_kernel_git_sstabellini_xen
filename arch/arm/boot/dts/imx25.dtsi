@@ -9,10 +9,12 @@
  * http://www.gnu.org/copyleft/gpl.html
  */
 
-#include "skeleton.dtsi"
 #include "imx25-pinfunc.h"
 
 / {
+	#address-cells = <1>;
+	#size-cells = <1>;
+
 	aliases {
 		ethernet0 = &fec;
 		gpio0 = &gpio1;
@@ -418,6 +420,15 @@
 				clocks = <&clks 107>, <&clks 52>;
 				clock-names = "ipg", "per";
 				interrupts = <41>;
+			};
+
+			scc: crypto@53fac000 {
+				compatible = "fsl,imx25-scc";
+				reg = <0x53fac000 0x4000>;
+				clocks = <&clks 111>;
+				clock-names = "ipg";
+				interrupts = <49>, <50>;
+				interrupt-names = "scm", "smn";
 			};
 
 			esdhc1: esdhc@53fb4000 {

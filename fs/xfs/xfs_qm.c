@@ -783,13 +783,10 @@ xfs_qm_qino_alloc(
 		}
 	}
 
-	tp = xfs_trans_alloc(mp, XFS_TRANS_QM_QINOCREATE);
-	error = xfs_trans_reserve(tp, &M_RES(mp)->tr_create,
-				  XFS_QM_QINOCREATE_SPACE_RES(mp), 0);
-	if (error) {
-		xfs_trans_cancel(tp);
+	error = xfs_trans_alloc(mp, &M_RES(mp)->tr_create,
+			XFS_QM_QINOCREATE_SPACE_RES(mp), 0, 0, &tp);
+	if (error)
 		return error;
-	}
 
 	if (need_alloc) {
 		error = xfs_dir_ialloc(&tp, NULL, S_IFREG, 1, 0, 0, 1, ip,
@@ -1138,7 +1135,7 @@ xfs_qm_get_rtblks(
 			return error;
 	}
 	rtblks = 0;
-	nextents = ifp->if_bytes / (uint)sizeof(xfs_bmbt_rec_t);
+	nextents = xfs_iext_count(ifp);
 	for (idx = 0; idx < nextents; idx++)
 		rtblks += xfs_bmbt_get_blockcount(xfs_iext_get_ext(ifp, idx));
 	*O_rtblks = (xfs_qcnt_t)rtblks;

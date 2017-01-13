@@ -21,7 +21,7 @@
 #include <linux/module.h>
 #include <linux/ctype.h>
 #include <linux/string_helpers.h>
-#include <asm/uaccess.h>
+#include <linux/uaccess.h>
 #include <linux/poll.h>
 #include <linux/seq_file.h>
 #include <linux/proc_fs.h>
@@ -353,7 +353,7 @@ void sunrpc_init_cache_detail(struct cache_detail *cd)
 	spin_unlock(&cache_list_lock);
 
 	/* start the cleaning process */
-	schedule_delayed_work(&cache_cleaner, 0);
+	queue_delayed_work(system_power_efficient_wq, &cache_cleaner, 0);
 }
 EXPORT_SYMBOL_GPL(sunrpc_init_cache_detail);
 
@@ -362,7 +362,7 @@ void sunrpc_destroy_cache_detail(struct cache_detail *cd)
 	cache_purge(cd);
 	spin_lock(&cache_list_lock);
 	write_lock(&cd->hash_lock);
-	if (cd->entries || atomic_read(&cd->inuse)) {
+	if (cd->entries) {
 		write_unlock(&cd->hash_lock);
 		spin_unlock(&cache_list_lock);
 		goto out;
@@ -476,7 +476,8 @@ static void do_cache_clean(struct work_struct *work)
 		delay = 0;
 
 	if (delay)
-		schedule_delayed_work(&cache_cleaner, delay);
+		queue_delayed_work(system_power_efficient_wq,
+				   &cache_cleaner, delay);
 }
 
 
@@ -881,7 +882,7 @@ static ssize_t cache_downcall(struct address_space *mapping,
 	char *kaddr;
 	ssize_t ret = -ENOMEM;
 
-	if (count >= PAGE_CACHE_SIZE)
+	if (count >= PAGE_SIZE)
 		goto out_slow;
 
 	page = find_or_create_page(mapping, 0, GFP_KERNEL);
@@ -892,7 +893,7 @@ static ssize_t cache_downcall(struct address_space *mapping,
 	ret = cache_do_downcall(kaddr, buf, count, cd);
 	kunmap(page);
 	unlock_page(page);
-	page_cache_release(page);
+	put_page(page);
 	return ret;
 out_slow:
 	return cache_slow_downcall(buf, count, cd);

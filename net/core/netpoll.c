@@ -163,7 +163,7 @@ static void poll_one_napi(struct napi_struct *napi)
 	 */
 	work = napi->poll(napi, 0);
 	WARN_ONCE(work, "%pF exceeded budget in poll\n", napi->poll);
-	trace_napi_poll(napi);
+	trace_napi_poll(napi, work, 0);
 
 	clear_bit(NAPI_STATE_NPSVC, &napi->state);
 }
@@ -171,12 +171,12 @@ static void poll_one_napi(struct napi_struct *napi)
 static void poll_napi(struct net_device *dev)
 {
 	struct napi_struct *napi;
+	int cpu = smp_processor_id();
 
 	list_for_each_entry(napi, &dev->napi_list, dev_list) {
-		if (napi->poll_owner != smp_processor_id() &&
-		    spin_trylock(&napi->poll_lock)) {
+		if (cmpxchg(&napi->poll_owner, -1, cpu) == -1) {
 			poll_one_napi(napi);
-			spin_unlock(&napi->poll_lock);
+			smp_store_release(&napi->poll_owner, -1);
 		}
 	}
 }
@@ -603,6 +603,7 @@ int __netpoll_setup(struct netpoll *np, struct net_device *ndev)
 	const struct net_device_ops *ops;
 	int err;
 
+	np->dev = ndev;
 	strlcpy(np->dev_name, ndev->name, IFNAMSIZ);
 	INIT_WORK(&np->cleanup_work, netpoll_async_cleanup);
 
@@ -669,7 +670,6 @@ int netpoll_setup(struct netpoll *np)
 		goto unlock;
 	}
 	dev_hold(ndev);
-	np->dev = ndev;
 
 	if (netdev_master_upper_dev_get(ndev)) {
 		np_err(np, "%s is a slave device, aborting\n", np->dev_name);
@@ -770,7 +770,6 @@ int netpoll_setup(struct netpoll *np)
 	return 0;
 
 put:
-	np->dev = NULL;
 	dev_put(ndev);
 unlock:
 	rtnl_unlock();

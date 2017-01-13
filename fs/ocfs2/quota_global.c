@@ -483,7 +483,7 @@ int __ocfs2_sync_dquot(struct dquot *dquot, int freeing)
 	struct ocfs2_mem_dqinfo *info = sb_dqinfo(sb, type)->dqi_priv;
 	struct ocfs2_global_disk_dqblk dqblk;
 	s64 spacechange, inodechange;
-	time_t olditime, oldbtime;
+	time64_t olditime, oldbtime;
 
 	err = sb->s_op->quota_read(sb, type, (char *)&dqblk,
 				   sizeof(struct ocfs2_global_disk_dqblk),
@@ -634,7 +634,15 @@ static void qsync_work_fn(struct work_struct *work)
 						      dqi_sync_work.work);
 	struct super_block *sb = oinfo->dqi_gqinode->i_sb;
 
-	dquot_scan_active(sb, ocfs2_sync_dquot_helper, oinfo->dqi_type);
+	/*
+	 * We have to be careful here not to deadlock on s_umount as umount
+	 * disabling quotas may be in progress and it waits for this work to
+	 * complete. If trylock fails, we'll do the sync next time...
+	 */
+	if (down_read_trylock(&sb->s_umount)) {
+		dquot_scan_active(sb, ocfs2_sync_dquot_helper, oinfo->dqi_type);
+		up_read(&sb->s_umount);
+	}
 	schedule_delayed_work(&oinfo->dqi_sync_work,
 			      msecs_to_jiffies(oinfo->dqi_syncms));
 }
@@ -867,6 +875,10 @@ static int ocfs2_get_next_id(struct super_block *sb, struct kqid *qid)
 	int status = 0;
 
 	trace_ocfs2_get_next_id(from_kqid(&init_user_ns, *qid), type);
+	if (!sb_has_quota_loaded(sb, type)) {
+		status = -ESRCH;
+		goto out;
+	}
 	status = ocfs2_lock_global_qf(info, 0);
 	if (status < 0)
 		goto out;
@@ -878,8 +890,11 @@ static int ocfs2_get_next_id(struct super_block *sb, struct kqid *qid)
 out_global:
 	ocfs2_unlock_global_qf(info, 0);
 out:
-	/* Avoid logging ENOENT since it just means there isn't next ID */
-	if (status && status != -ENOENT)
+	/*
+	 * Avoid logging ENOENT since it just means there isn't next ID and
+	 * ESRCH which means quota isn't enabled for the filesystem.
+	 */
+	if (status && status != -ENOENT && status != -ESRCH)
 		mlog_errno(status);
 	return status;
 }

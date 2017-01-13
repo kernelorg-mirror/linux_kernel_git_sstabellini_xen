@@ -17,6 +17,7 @@
  *
  */
 
+#include <linux/delay.h>
 #define VIRTIO_PCI_NO_LEGACY
 #include "virtio_pci_common.h"
 
@@ -32,12 +33,12 @@ static inline u8 vp_ioread8(u8 __iomem *addr)
 {
 	return ioread8(addr);
 }
-static inline u16 vp_ioread16 (u16 __iomem *addr)
+static inline u16 vp_ioread16 (__le16 __iomem *addr)
 {
 	return ioread16(addr);
 }
 
-static inline u32 vp_ioread32(u32 __iomem *addr)
+static inline u32 vp_ioread32(__le32 __iomem *addr)
 {
 	return ioread32(addr);
 }
@@ -47,12 +48,12 @@ static inline void vp_iowrite8(u8 value, u8 __iomem *addr)
 	iowrite8(value, addr);
 }
 
-static inline void vp_iowrite16(u16 value, u16 __iomem *addr)
+static inline void vp_iowrite16(u16 value, __le16 __iomem *addr)
 {
 	iowrite16(value, addr);
 }
 
-static inline void vp_iowrite32(u32 value, u32 __iomem *addr)
+static inline void vp_iowrite32(u32 value, __le32 __iomem *addr)
 {
 	iowrite32(value, addr);
 }
@@ -271,9 +272,13 @@ static void vp_reset(struct virtio_device *vdev)
 	struct virtio_pci_device *vp_dev = to_vp_device(vdev);
 	/* 0 status means a reset. */
 	vp_iowrite8(0, &vp_dev->common->device_status);
-	/* Flush out the status write, and flush in device writes,
-	 * including MSI-X interrupts, if any. */
-	vp_ioread8(&vp_dev->common->device_status);
+	/* After writing 0 to device_status, the driver MUST wait for a read of
+	 * device_status to return 0 before reinitializing the device.
+	 * This will flush out the status write, and flush in device writes,
+	 * including MSI-X interrupts, if any.
+	 */
+	while (vp_ioread8(&vp_dev->common->device_status))
+		msleep(1);
 	/* Flush pending VQ/configuration callbacks. */
 	vp_synchronize_vectors(vdev);
 }

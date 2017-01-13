@@ -579,7 +579,7 @@ static inline int cpumask_parselist_user(const char __user *buf, int len,
 }
 
 /**
- * cpumask_parse - extract a cpumask from from a string
+ * cpumask_parse - extract a cpumask from a string
  * @buf: the buffer to extract from
  * @dstp: the cpumask to set.
  *
@@ -722,6 +722,11 @@ void init_cpu_present(const struct cpumask *src);
 void init_cpu_possible(const struct cpumask *src);
 void init_cpu_online(const struct cpumask *src);
 
+static inline void reset_cpu_possible_mask(void)
+{
+	bitmap_zero(cpumask_bits(&__cpu_possible_mask), NR_CPUS);
+}
+
 static inline void
 set_cpu_possible(unsigned int cpu, bool possible)
 {
@@ -743,12 +748,10 @@ set_cpu_present(unsigned int cpu, bool present)
 static inline void
 set_cpu_online(unsigned int cpu, bool online)
 {
-	if (online) {
+	if (online)
 		cpumask_set_cpu(cpu, &__cpu_online_mask);
-		cpumask_set_cpu(cpu, &__cpu_active_mask);
-	} else {
+	else
 		cpumask_clear_cpu(cpu, &__cpu_online_mask);
-	}
 }
 
 static inline void

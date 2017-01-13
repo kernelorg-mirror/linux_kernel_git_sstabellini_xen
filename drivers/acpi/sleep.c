@@ -26,6 +26,11 @@
 #include "internal.h"
 #include "sleep.h"
 
+/*
+ * Some HW-full platforms do not have _S5, so they may need
+ * to leverage efi power off for a shutdown.
+ */
+bool acpi_no_s5;
 static u8 sleep_states[ACPI_S_STATE_COUNT];
 
 static void acpi_sleep_tts_switch(u32 acpi_state)
@@ -550,7 +555,7 @@ static int acpi_suspend_enter(suspend_state_t pm_state)
 
 		acpi_get_event_status(ACPI_EVENT_POWER_BUTTON, &pwr_btn_status);
 
-		if (pwr_btn_status & ACPI_EVENT_FLAG_SET) {
+		if (pwr_btn_status & ACPI_EVENT_FLAG_STATUS_SET) {
 			acpi_clear_event(ACPI_EVENT_POWER_BUTTON);
 			/* Flag for later */
 			pwr_btn_event_pending = true;
@@ -564,7 +569,7 @@ static int acpi_suspend_enter(suspend_state_t pm_state)
 	 */
 	acpi_disable_all_gpes();
 	/* Allow EC transactions to happen. */
-	acpi_ec_unblock_transactions_early();
+	acpi_ec_unblock_transactions();
 
 	suspend_nvs_restore();
 
@@ -669,6 +674,14 @@ static void acpi_sleep_suspend_setup(void)
 		if (acpi_sleep_state_supported(i))
 			sleep_states[i] = 1;
 
+	/*
+	 * Use suspend-to-idle by default if ACPI_FADT_LOW_POWER_S0 is set and
+	 * the default suspend mode was not selected from the command line.
+	 */
+	if (acpi_gbl_FADT.flags & ACPI_FADT_LOW_POWER_S0 &&
+	    mem_sleep_default > PM_SUSPEND_MEM)
+		mem_sleep_default = PM_SUSPEND_FREEZE;
+
 	suspend_set_ops(old_suspend_ordering ?
 		&acpi_suspend_ops_old : &acpi_suspend_ops);
 	freeze_set_ops(&acpi_freeze_ops);
@@ -762,7 +775,7 @@ static void acpi_hibernation_leave(void)
 	/* Restore the NVS memory area */
 	suspend_nvs_restore();
 	/* Allow EC transactions to happen. */
-	acpi_ec_unblock_transactions_early();
+	acpi_ec_unblock_transactions();
 }
 
 static void acpi_pm_thaw(void)
@@ -882,6 +895,8 @@ int __init acpi_sleep_init(void)
 		sleep_states[ACPI_STATE_S5] = 1;
 		pm_power_off_prepare = acpi_power_off_prepare;
 		pm_power_off = acpi_power_off;
+	} else {
+		acpi_no_s5 = true;
 	}
 
 	supported[0] = 0;

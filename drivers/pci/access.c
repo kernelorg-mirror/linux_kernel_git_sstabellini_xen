@@ -142,10 +142,22 @@ int pci_generic_config_write32(struct pci_bus *bus, unsigned int devfn,
 	if (size == 4) {
 		writel(val, addr);
 		return PCIBIOS_SUCCESSFUL;
-	} else {
-		mask = ~(((1 << (size * 8)) - 1) << ((where & 0x3) * 8));
 	}
 
+	/*
+	 * In general, hardware that supports only 32-bit writes on PCI is
+	 * not spec-compliant.  For example, software may perform a 16-bit
+	 * write.  If the hardware only supports 32-bit accesses, we must
+	 * do a 32-bit read, merge in the 16 bits we intend to write,
+	 * followed by a 32-bit write.  If the 16 bits we *don't* intend to
+	 * write happen to have any RW1C (write-one-to-clear) bits set, we
+	 * just inadvertently cleared something we shouldn't have.
+	 */
+	dev_warn_ratelimited(&bus->dev, "%d-byte config write to %04x:%02x:%02x.%d offset %#x may corrupt adjacent RW1C bits\n",
+			     size, pci_domain_nr(bus), bus->number,
+			     PCI_SLOT(devfn), PCI_FUNC(devfn), where);
+
+	mask = ~(((1 << (size * 8)) - 1) << ((where & 0x3) * 8));
 	tmp = readl(addr) & mask;
 	tmp |= val << ((where & 0x3) * 8);
 	writel(tmp, addr);
@@ -274,6 +286,19 @@ ssize_t pci_write_vpd(struct pci_dev *dev, loff_t pos, size_t count, const void 
 	return dev->vpd->ops->write(dev, pos, count, buf);
 }
 EXPORT_SYMBOL(pci_write_vpd);
+
+/**
+ * pci_set_vpd_size - Set size of Vital Product Data space
+ * @dev:	pci device struct
+ * @len:	size of vpd space
+ */
+int pci_set_vpd_size(struct pci_dev *dev, size_t len)
+{
+	if (!dev->vpd || !dev->vpd->ops)
+		return -ENODEV;
+	return dev->vpd->ops->set_size(dev, len);
+}
+EXPORT_SYMBOL(pci_set_vpd_size);
 
 #define PCI_VPD_MAX_SIZE (PCI_VPD_ADDR_MASK + 1)
 
@@ -498,9 +523,23 @@ out:
 	return ret ? ret : count;
 }
 
+static int pci_vpd_set_size(struct pci_dev *dev, size_t len)
+{
+	struct pci_vpd *vpd = dev->vpd;
+
+	if (len == 0 || len > PCI_VPD_MAX_SIZE)
+		return -EIO;
+
+	vpd->valid = 1;
+	vpd->len = len;
+
+	return 0;
+}
+
 static const struct pci_vpd_ops pci_vpd_ops = {
 	.read = pci_vpd_read,
 	.write = pci_vpd_write,
+	.set_size = pci_vpd_set_size,
 };
 
 static ssize_t pci_vpd_f0_read(struct pci_dev *dev, loff_t pos, size_t count,
@@ -533,9 +572,24 @@ static ssize_t pci_vpd_f0_write(struct pci_dev *dev, loff_t pos, size_t count,
 	return ret;
 }
 
+static int pci_vpd_f0_set_size(struct pci_dev *dev, size_t len)
+{
+	struct pci_dev *tdev = pci_get_slot(dev->bus,
+					    PCI_DEVFN(PCI_SLOT(dev->devfn), 0));
+	int ret;
+
+	if (!tdev)
+		return -ENODEV;
+
+	ret = pci_set_vpd_size(tdev, len);
+	pci_dev_put(tdev);
+	return ret;
+}
+
 static const struct pci_vpd_ops pci_vpd_f0_ops = {
 	.read = pci_vpd_f0_read,
 	.write = pci_vpd_f0_write,
+	.set_size = pci_vpd_f0_set_size,
 };
 
 int pci_vpd_init(struct pci_dev *dev)

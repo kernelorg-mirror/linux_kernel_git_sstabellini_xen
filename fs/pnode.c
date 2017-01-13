@@ -67,49 +67,47 @@ int get_dominating_id(struct mount *mnt, const struct path *root)
 
 static int do_make_slave(struct mount *mnt)
 {
-	struct mount *peer_mnt = mnt, *master = mnt->mnt_master;
-	struct mount *slave_mnt;
+	struct mount *master, *slave_mnt;
 
-	/*
-	 * slave 'mnt' to a peer mount that has the
-	 * same root dentry. If none is available then
-	 * slave it to anything that is available.
-	 */
-	while ((peer_mnt = next_peer(peer_mnt)) != mnt &&
-	       peer_mnt->mnt.mnt_root != mnt->mnt.mnt_root) ;
-
-	if (peer_mnt == mnt) {
-		peer_mnt = next_peer(mnt);
-		if (peer_mnt == mnt)
-			peer_mnt = NULL;
-	}
-	if (mnt->mnt_group_id && IS_MNT_SHARED(mnt) &&
-	    list_empty(&mnt->mnt_share))
-		mnt_release_group_id(mnt);
-
-	list_del_init(&mnt->mnt_share);
-	mnt->mnt_group_id = 0;
-
-	if (peer_mnt)
-		master = peer_mnt;
-
-	if (master) {
-		list_for_each_entry(slave_mnt, &mnt->mnt_slave_list, mnt_slave)
-			slave_mnt->mnt_master = master;
-		list_move(&mnt->mnt_slave, &master->mnt_slave_list);
-		list_splice(&mnt->mnt_slave_list, master->mnt_slave_list.prev);
-		INIT_LIST_HEAD(&mnt->mnt_slave_list);
-	} else {
-		struct list_head *p = &mnt->mnt_slave_list;
-		while (!list_empty(p)) {
-                        slave_mnt = list_first_entry(p,
-					struct mount, mnt_slave);
-			list_del_init(&slave_mnt->mnt_slave);
-			slave_mnt->mnt_master = NULL;
+	if (list_empty(&mnt->mnt_share)) {
+		if (IS_MNT_SHARED(mnt)) {
+			mnt_release_group_id(mnt);
+			CLEAR_MNT_SHARED(mnt);
 		}
+		master = mnt->mnt_master;
+		if (!master) {
+			struct list_head *p = &mnt->mnt_slave_list;
+			while (!list_empty(p)) {
+				slave_mnt = list_first_entry(p,
+						struct mount, mnt_slave);
+				list_del_init(&slave_mnt->mnt_slave);
+				slave_mnt->mnt_master = NULL;
+			}
+			return 0;
+		}
+	} else {
+		struct mount *m;
+		/*
+		 * slave 'mnt' to a peer mount that has the
+		 * same root dentry. If none is available then
+		 * slave it to anything that is available.
+		 */
+		for (m = master = next_peer(mnt); m != mnt; m = next_peer(m)) {
+			if (m->mnt.mnt_root == mnt->mnt.mnt_root) {
+				master = m;
+				break;
+			}
+		}
+		list_del_init(&mnt->mnt_share);
+		mnt->mnt_group_id = 0;
+		CLEAR_MNT_SHARED(mnt);
 	}
+	list_for_each_entry(slave_mnt, &mnt->mnt_slave_list, mnt_slave)
+		slave_mnt->mnt_master = master;
+	list_move(&mnt->mnt_slave, &master->mnt_slave_list);
+	list_splice(&mnt->mnt_slave_list, master->mnt_slave_list.prev);
+	INIT_LIST_HEAD(&mnt->mnt_slave_list);
 	mnt->mnt_master = master;
-	CLEAR_MNT_SHARED(mnt);
 	return 0;
 }
 
@@ -198,7 +196,7 @@ static struct mount *next_group(struct mount *m, struct mount *origin)
 
 /* all accesses are serialized by namespace_sem */
 static struct user_namespace *user_ns;
-static struct mount *last_dest, *last_source, *dest_master;
+static struct mount *last_dest, *first_source, *last_source, *dest_master;
 static struct mountpoint *mp;
 static struct hlist_head *list;
 
@@ -221,20 +219,22 @@ static int propagate_one(struct mount *m)
 		type = CL_MAKE_SHARED;
 	} else {
 		struct mount *n, *p;
+		bool done;
 		for (n = m; ; n = p) {
 			p = n->mnt_master;
-			if (p == dest_master || IS_MNT_MARKED(p)) {
-				while (last_dest->mnt_master != p) {
-					last_source = last_source->mnt_master;
-					last_dest = last_source->mnt_parent;
-				}
-				if (!peers(n, last_dest)) {
-					last_source = last_source->mnt_master;
-					last_dest = last_source->mnt_parent;
-				}
+			if (p == dest_master || IS_MNT_MARKED(p))
 				break;
-			}
 		}
+		do {
+			struct mount *parent = last_source->mnt_parent;
+			if (last_source == first_source)
+				break;
+			done = parent->mnt_master == p;
+			if (done && peers(n, parent))
+				break;
+			last_source = last_source->mnt_master;
+		} while (!done);
+
 		type = CL_SLAVE;
 		/* beginning of peer group among the slaves? */
 		if (IS_MNT_SHARED(m))
@@ -257,7 +257,7 @@ static int propagate_one(struct mount *m)
 		read_sequnlock_excl(&mount_lock);
 	}
 	hlist_add_head(&child->mnt_hash, list);
-	return 0;
+	return count_mounts(m->mnt_ns, child);
 }
 
 /*
@@ -286,6 +286,7 @@ int propagate_mnt(struct mount *dest_mnt, struct mountpoint *dest_mp,
 	 */
 	user_ns = current->nsproxy->mnt_ns->user_ns;
 	last_dest = dest_mnt;
+	first_source = source_mnt;
 	last_source = source_mnt;
 	mp = dest_mp;
 	list = tree_list;

@@ -170,7 +170,7 @@ static int swapin_walk_pmd_entry(pmd_t *pmd, unsigned long start,
 		page = read_swap_cache_async(entry, GFP_HIGHUSER_MOVABLE,
 								vma, index);
 		if (page)
-			page_cache_release(page);
+			put_page(page);
 	}
 
 	return 0;
@@ -204,14 +204,14 @@ static void force_shm_swapin_readahead(struct vm_area_struct *vma,
 		page = find_get_entry(mapping, index);
 		if (!radix_tree_exceptional_entry(page)) {
 			if (page)
-				page_cache_release(page);
+				put_page(page);
 			continue;
 		}
 		swap = radix_to_swp_entry(page);
 		page = read_swap_cache_async(swap, GFP_HIGHUSER_MOVABLE,
 								NULL, 0);
 		if (page)
-			page_cache_release(page);
+			put_page(page);
 	}
 
 	lru_add_drain();	/* Push any new pages onto the LRU now */
@@ -281,6 +281,7 @@ static int madvise_free_pte_range(pmd_t *pmd, unsigned long addr,
 	if (pmd_trans_unstable(pmd))
 		return 0;
 
+	tlb_remove_check_page_size_change(tlb, PAGE_SIZE);
 	orig_pte = pte = pte_offset_map_lock(mm, pmd, addr, &ptl);
 	arch_enter_lazy_mmu_mode();
 	for (; addr != end; pte++, addr += PAGE_SIZE) {
@@ -707,10 +708,12 @@ SYSCALL_DEFINE3(madvise, unsigned long, start, size_t, len_in, int, behavior)
 		return error;
 
 	write = madvise_need_mmap_write(behavior);
-	if (write)
-		down_write(&current->mm->mmap_sem);
-	else
+	if (write) {
+		if (down_write_killable(&current->mm->mmap_sem))
+			return -EINTR;
+	} else {
 		down_read(&current->mm->mmap_sem);
+	}
 
 	/*
 	 * If the interval [start,end) covers some unmapped address
