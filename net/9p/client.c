@@ -405,6 +405,14 @@ static void p9_free_req(struct p9_client *c, struct p9_req_t *r)
 	int tag = r->tc->tag;
 	p9_debug(P9_DEBUG_MUX, "clnt %p req %p tag: %d\n", c, r, tag);
 
+	r->fid = NULL;
+	r->file_offset = 0;
+	r->page_offset = 0;
+	r->tot_size = 0;
+	r->completed = 0;
+	r->rsize = 0;
+	r->kiocb = NULL;
+	r->pagevec = NULL;
 	r->status = REQ_STATUS_IDLE;
 	if (tag != P9_NOTAG && p9_idpool_check(tag, c->tagpool))
 		p9_idpool_put(tag, c->tagpool);
@@ -427,7 +435,10 @@ void p9_client_cb(struct p9_client *c, struct p9_req_t *req, int status)
 	smp_wmb();
 	req->status = status;
 
-	wake_up(req->wq);
+	if (req->kiocb != NULL)
+		schedule_work(&req->work);
+	else
+		wake_up(req->wq);
 	p9_debug(P9_DEBUG_MUX, "wakeup: %d\n", req->tc->tag);
 }
 EXPORT_SYMBOL(p9_client_cb);

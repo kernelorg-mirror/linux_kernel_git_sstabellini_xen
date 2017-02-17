@@ -110,13 +110,25 @@ enum p9_req_status_t {
  *
  */
 
+struct p9_fid;
 struct p9_req_t {
+	struct p9_fid *fid;
 	int status;
 	int t_err;
 	wait_queue_head_t *wq;
 	struct p9_fcall *tc;
 	struct p9_fcall *rc;
 	void *aux;
+
+	/* Used for async requests */
+	struct work_struct work;
+	size_t file_offset;
+	size_t page_offset;
+	size_t tot_size;
+	size_t completed;
+	unsigned int rsize;
+	struct page **pagevec;
+	struct kiocb *kiocb;
 
 	struct list_head req_list;
 };
