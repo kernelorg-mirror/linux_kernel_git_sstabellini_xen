@@ -26,6 +26,7 @@
 #ifndef NET_9P_CLIENT_H
 #define NET_9P_CLIENT_H
 
+#include <linux/fs.h>
 #include <linux/utsname.h>
 
 /* Number of requests per row */
@@ -238,8 +239,10 @@ int p9_client_clunk(struct p9_fid *fid);
 int p9_client_fsync(struct p9_fid *fid, int datasync);
 int p9_client_remove(struct p9_fid *fid);
 int p9_client_unlinkat(struct p9_fid *dfid, const char *name, int flags);
-int p9_client_read(struct p9_fid *fid, u64 offset, struct iov_iter *to, int *err);
-int p9_client_write(struct p9_fid *fid, u64 offset, struct iov_iter *from, int *err);
+int p9_client_read(struct p9_fid *fid, struct kiocb *iocb, u64 offset,
+                    struct iov_iter *to, int *err);
+int p9_client_write(struct p9_fid *fid, struct kiocb *iocb, u64 offset,
+                    struct iov_iter *from, int *err);
 int p9_client_readdir(struct p9_fid *fid, char *data, u32 count, u64 offset);
 int p9dirent_read(struct p9_client *clnt, char *buf, int len,
 		  struct p9_dirent *dirent);
