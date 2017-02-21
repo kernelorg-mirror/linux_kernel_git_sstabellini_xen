@@ -387,7 +387,7 @@ v9fs_file_read_iter(struct kiocb *iocb, struct iov_iter *to)
 	p9_debug(P9_DEBUG_VFS, "count %zu offset %lld\n",
 		 iov_iter_count(to), iocb->ki_pos);
 
-	ret = p9_client_read(fid, iocb->ki_pos, to, &err);
+	ret = p9_client_read(fid, iocb, iocb->ki_pos, to, &err);
 	if (!ret)
 		return err;
 
@@ -416,7 +416,7 @@ v9fs_file_write_iter(struct kiocb *iocb, struct iov_iter *from)
 		return retval;
 
 	origin = iocb->ki_pos;
-	retval = p9_client_write(file->private_data, iocb->ki_pos, from, &err);
+	retval = p9_client_write(file->private_data, iocb, iocb->ki_pos, from, &err);
 	if (retval > 0) {
 		struct inode *inode = file_inode(file);
 		loff_t i_size;
