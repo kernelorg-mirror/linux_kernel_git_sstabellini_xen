@@ -205,6 +205,12 @@ config XEN_SCSI_BACKEND
 	  Only needed for systems running as XEN driver domains (e.g. Dom0) and
 	  if guests need generic access to SCSI devices.
 
+config XEN_PVCALLS
+	bool "XEN PV Calls frontend and backend drivers"
+	depends on INET && XEN
+	help
+	  Xen paravirtualized protocol for POSIX syscalls.
+
 config XEN_PRIVCMD
 	tristate
 	depends on XEN
