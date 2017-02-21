@@ -1732,6 +1732,63 @@ p9_client_read(struct p9_fid *fid, struct kiocb *iocb, u64 offset,
 }
 EXPORT_SYMBOL(p9_client_read);
 
+static void
+p9_client_write_complete(struct work_struct *work)
+{
+	struct p9_req_t *req = container_of(work, struct p9_req_t, work);
+	struct p9_client *clnt = req->fid->clnt;
+	int err, count;
+	struct file *file;
+	struct inode *inode;
+	unsigned long pg_start, pg_end;
+	loff_t i_size;
+
+	if (req->status == REQ_STATUS_ERROR) {
+		p9_debug(P9_DEBUG_ERROR, "req_status error %d\n", req->t_err);
+		err = req->t_err;
+		goto out;
+	}
+	err = p9_check_errors(clnt, req);
+	if (err)
+		goto out;
+
+	err = p9pdu_readf(req->rc, clnt->proto_version, "d", &count);
+	if (err) {
+		trace_9p_protocol_dump(clnt, req->rc);
+		goto out;
+	}
+	if (!count) {
+		p9_debug(P9_DEBUG_ERROR, "count=%d\n", count);
+		err = 0;
+		goto out;
+	}
+
+	p9_debug(P9_DEBUG_9P, "<<< RWRITE count %d\n", count);
+
+	if (count > req->rsize)
+		count = req->rsize;
+
+	err = count;
+	file = req->kiocb->ki_filp;
+	inode = file_inode(file);
+	pg_start = req->kiocb->ki_pos >> PAGE_SHIFT;
+	pg_end = (req->kiocb->ki_pos + count - 1) >> PAGE_SHIFT;
+
+	if (inode->i_mapping && inode->i_mapping->nrpages)
+		invalidate_inode_pages2_range(inode->i_mapping,
+				pg_start, pg_end);
+	req->kiocb->ki_pos += count;
+	i_size = i_size_read(inode);
+	if (req->kiocb->ki_pos > i_size) {
+		inode_add_bytes(inode, req->kiocb->ki_pos - i_size);
+		i_size_write(inode, req->kiocb->ki_pos);
+	}
+out:
+	req->kiocb->ki_complete(req->kiocb, err, 0);
+
+	p9_free_req(clnt, req);
+}
+
 int
 p9_client_write(struct p9_fid *fid, struct kiocb *iocb, u64 offset,
 				struct iov_iter *from, int *err)
@@ -1759,9 +1816,35 @@ p9_client_write(struct p9_fid *fid, struct kiocb *iocb, u64 offset,
 			req = p9_client_zc_rpc(clnt, P9_TWRITE, NULL, from, 0,
 					       rsize, P9_ZC_HDR_SZ, "dqd",
 					       fid->fid, offset, rsize);
-		} else {
+		/* sync request */
+		} else if(iocb == NULL || is_sync_kiocb(iocb)) {
 			req = p9_client_rpc(clnt, P9_TWRITE, "dqV", fid->fid,
 						    offset, rsize, from);
+		/* async request */
+		} else {
+			req = p9_client_get_req(clnt, P9_TWRITE, "dqV", fid->fid,
+					offset, rsize, from);
+			if (IS_ERR(req)) {
+				*err = PTR_ERR(req);
+				break;
+			}
+			req->fid = fid;
+			req->rsize = rsize;
+			req->tot_size = count;
+			req->file_offset = offset;
+			req->kiocb = iocb;
+			INIT_WORK(&req->work, p9_client_write_complete);
+
+			*err = clnt->trans_mod->request(clnt, req);
+			if (*err < 0) {
+				clnt->status = Disconnected;
+				p9_free_req(clnt, req);
+				break;
+			}
+
+			iov_iter_advance(from, rsize);
+			*err = -EIOCBQUEUED;
+			break;
 		}
 		if (IS_ERR(req)) {
 			*err = PTR_ERR(req);
