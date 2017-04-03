@@ -18,6 +18,10 @@
 / {
 	interrupt-parent = <&gic>;
 
+	aliases {
+		serial2 = &serial_2;
+	};
+
 	chipid@10000000 {
 		compatible = "samsung,exynos4210-chipid";
 		reg = <0x10000000 0x100>;
@@ -62,7 +66,7 @@
 		interrupts = <0 52 0>;
 	};
 
-	serial@12C20000 {
+	serial_2: serial@12C20000 {
 		compatible = "samsung,exynos4210-uart";
 		reg = <0x12C20000 0x100>;
 		interrupts = <0 53 0>;
