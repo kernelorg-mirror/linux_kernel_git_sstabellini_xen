@@ -68,6 +68,7 @@ struct sock_mapping {
 			struct pvcalls_data data;
 			struct mutex in_mutex;
 			struct mutex out_mutex;
+			atomic_t sock_refcount;
 
 			wait_queue_head_t inflight_conn_req;
 		} active;
@@ -497,15 +498,23 @@ int pvcalls_front_sendmsg(struct socket *sock, struct msghdr *msg,
 	}
 	bedata = dev_get_drvdata(&pvcalls_front_dev->dev);
 
+	local_irq_disable();
+	preempt_disable();
 	map = (struct sock_mapping *) sock->sk->sk_send_head;
 	if (!map) {
+		local_irq_enable();
+		preempt_enable();
 		pvcalls_exit();
 		return -ENOTSOCK;
 	}
 
+	atomic_inc(&map->active.sock_refcount);
+	local_irq_enable();
+	preempt_enable();
 	mutex_lock(&map->active.out_mutex);
 	if ((flags & MSG_DONTWAIT) && !pvcalls_front_write_todo(map)) {
 		mutex_unlock(&map->active.out_mutex);
+		atomic_dec(&map->active.sock_refcount);
 		pvcalls_exit();
 		return -EAGAIN;
 	}
@@ -528,6 +537,7 @@ again:
 		tot_sent = sent;
 
 	mutex_unlock(&map->active.out_mutex);
+	atomic_dec(&map->active.sock_refcount);
 	pvcalls_exit();
 	return tot_sent;
 }
@@ -600,12 +610,19 @@ int pvcalls_front_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
 	}
 	bedata = dev_get_drvdata(&pvcalls_front_dev->dev);
 
+	local_irq_disable();
+	preempt_disable();
 	map = (struct sock_mapping *) sock->sk->sk_send_head;
 	if (!map) {
+		local_irq_enable();
+		preempt_enable();
 		pvcalls_exit();
 		return -ENOTSOCK;
 	}
 
+	atomic_inc(&map->active.sock_refcount);
+	local_irq_enable();
+	preempt_enable();
 	mutex_lock(&map->active.in_mutex);
 	if (len > XEN_FLEX_RING_SIZE(PVCALLS_RING_ORDER))
 		len = XEN_FLEX_RING_SIZE(PVCALLS_RING_ORDER);
@@ -625,6 +642,7 @@ int pvcalls_front_recvmsg(struct socket *sock, struct msghdr *msg, size_t len,
 		ret = 0;
 
 	mutex_unlock(&map->active.in_mutex);
+	atomic_dec(&map->active.sock_refcount);
 	pvcalls_exit();
 	return ret;
 }
@@ -1044,11 +1062,9 @@ int pvcalls_front_release(struct socket *sock)
 
 		/*
 		 * We need to make sure that sendmsg/recvmsg on this socket have
-		 * not started before we've cleared sk_send_head here. The
-		 * easiest (though not optimal) way to guarantee this is to see
-		 * that no pvcall (other than us) is in progress.
+		 * not started before we've cleared sk_send_head here.
 		 */
-		while (atomic_read(&pvcalls_refcount) > 1)
+		while (atomic_read(&map->active.sock_refcount) > 0)
 			cpu_relax();
 
 		pvcalls_front_free_map(bedata, map);
