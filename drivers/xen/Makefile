@@ -14,6 +14,7 @@ dom0-$(CONFIG_USB_SUPPORT) += dbgp.o
 dom0-$(CONFIG_XEN_ACPI) += acpi.o $(xen-pad-y)
 xen-pad-$(CONFIG_X86) += xen-acpi-pad.o
 dom0-$(CONFIG_X86) += pcpu.o
+obj-y += shared_mem.o
 obj-$(CONFIG_XEN_DOM0)			+= $(dom0-y)
 obj-$(CONFIG_BLOCK)			+= biomerge.o
 obj-$(CONFIG_XEN_BALLOON)		+= xen-balloon.o
