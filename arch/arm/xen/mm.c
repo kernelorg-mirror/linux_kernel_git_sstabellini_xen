@@ -21,6 +21,8 @@
 #include <asm/xen/hypercall.h>
 #include <asm/xen/interface.h>
 
+int xen_swiotlb __read_mostly;
+
 unsigned long xen_get_swiotlb_free_pages(unsigned int order)
 {
 	struct memblock_region *reg;
@@ -189,6 +191,7 @@ int __init xen_mm_init(void)
 	struct gnttab_cache_flush cflush;
 	if (!xen_initial_domain())
 		return 0;
+	xen_swiotlb = 1;
 	xen_swiotlb_init(1, false);
 	xen_dma_ops = &xen_swiotlb_dma_ops;
 

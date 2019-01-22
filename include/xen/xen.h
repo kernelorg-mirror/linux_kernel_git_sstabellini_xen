@@ -46,4 +46,10 @@ struct bio_vec;
 bool xen_biovec_phys_mergeable(const struct bio_vec *vec1,
 		const struct bio_vec *vec2);
 
+#include <asm/xen/swiotlb-xen.h>
+static inline int xen_vring_use_dma(void)
+{
+	return !!xen_swiotlb;
+}
+
 #endif	/* _XEN_XEN_H */
