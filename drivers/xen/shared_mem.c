@@ -195,7 +195,7 @@ static int __init shared_mem_init(void)
 	int rc, ret;
 	char *str;
 	struct resource r;
-	struct device_node *np = of_find_compatible_node(NULL, NULL, "xen,shared-memory");
+	struct device_node *np = of_find_compatible_node(NULL, NULL, "xen,shared-memory-v1");
 	DEFINE_DMA_BUF_EXPORT_INFO(exp_info);
 
 	if (np == NULL) {
